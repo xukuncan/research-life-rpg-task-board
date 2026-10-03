@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f6f5f1" />
+    <title>研究牲任务系统</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="reward-rules.js" defer></script>
+    <script src="daily-reward-rules.js" defer></script>
+    <script src="achievement-rules.js" defer></script>
+    <script src="local-data.js" defer></script>
+    <script src="pixel-ui.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="主导航">
+        <a class="brand" href="#overview" aria-label="研究牲任务系统首页">
+          <span class="brand-mark" aria-hidden="true">研</span>
+          <span class="brand-name">研究牲<span>任务系统</span></span>
+        </a>
+
+        <p class="nav-label">工作空间</p>
+        <nav class="main-nav">
+          <a class="nav-link is-active" href="#overview" aria-current="page"><span class="nav-icon" data-pixel-icon="home" aria-hidden="true">⌂</span>总览</a>
+          <a class="nav-link" href="#tasks"><span class="nav-icon" data-pixel-icon="tasks" aria-hidden="true">▤</span>任务列表</a>
+          <a class="nav-link" href="#board"><span class="nav-icon" data-pixel-icon="board" aria-hidden="true">▥</span>看板</a>
+          <a class="nav-link" href="#calendar"><span class="nav-icon" data-pixel-icon="calendar" aria-hidden="true">▦</span>日历</a>
+        </nav>
+
+        <p class="nav-label nav-label-spaced">角色与奖励</p>
+        <nav class="main-nav">
+          <a class="nav-link" href="#growth"><span class="nav-icon" data-pixel-icon="growth" aria-hidden="true">✳</span>角色成长</a>
+          <a class="nav-link" href="#rewards"><span class="nav-icon" data-pixel-icon="rewards" aria-hidden="true">◇</span>奖励商店</a>
+          <a class="nav-link" href="#daily"><span class="nav-icon" data-pixel-icon="daily" aria-hidden="true">☼</span>每日奖励</a>
+          <a class="nav-link" href="#achievements"><span class="nav-icon" data-pixel-icon="achievements" aria-hidden="true">⚑</span>成就</a>
+        </nav>
+
+        <div class="sidebar-note">
+          <span class="note-spark" aria-hidden="true">✦</span>
+          <p>一步一步来，<br />现实也能升级。</p>
+        </div>
+        <div class="profile">
+          <div class="avatar" aria-hidden="true">你</div>
+          <div><strong>冒险者</strong><span>个人工作空间</span></div>
+          <span class="profile-menu" aria-hidden="true">···</span>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div class="breadcrumbs"><span>工作空间</span><span class="crumb-divider">/</span><strong id="current-section">总览</strong></div>
+          <div class="topbar-right"><span class="local-badge"><span class="status-dot"></span><span id="storage-mode-label">本地空间</span></span><button class="sound-toggle" id="sound-toggle" type="button" data-action="toggle-audio" aria-pressed="false" aria-label="开启像素音效"><span class="sound-toggle-icon" id="sound-toggle-icon" aria-hidden="true">♫</span><span id="sound-toggle-label">音效关</span></button><span class="date-label" id="today-label"></span></div>
+        </header>
+
+        <section class="page-content" id="page-content" tabindex="-1">
+          <div class="welcome-row">
+            <div>
+              <p class="eyebrow">你的现实生活冒险</p>
+              <h1>每一步，都算数<span class="title-spark" aria-hidden="true">✳</span></h1>
+              <p class="welcome-copy">把想做的事放进任务板，慢慢推进自己的主线。</p>
+            </div>
+            <div class="date-card"><span class="date-card-icon" aria-hidden="true">☼</span><div><span>今天</span><strong id="full-date"></strong></div></div>
+          </div>
+
+          <section class="overview-progress" id="overview-progress" aria-label="角色成长与金币余额">
+            <div class="overview-level"><span class="level-emblem" aria-hidden="true">LV</span><div class="overview-level-info"><div class="progress-heading"><strong>等级 <span id="overview-level">1</span></strong><span id="overview-xp">0 / 100 XP</span></div><div class="progress-track" role="progressbar" aria-label="当前等级经验进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="overview-progress-fill"></span></div><button class="level-detail-button" id="overview-level-detail" type="button" data-action="show-level-detail" hidden>查看详细等级</button></div></div>
+            <div class="overview-gold"><span class="gold-emblem" aria-hidden="true">币</span><div><span>金币余额</span><strong id="overview-gold">0</strong></div></div>
+            <a class="growth-link" href="#growth">角色档案 <span aria-hidden="true">→</span></a>
+          </section>
+
+          <section class="overview-task-section" aria-labelledby="overview-task-heading">
+            <div class="section-heading overview-task-heading"><div><p class="eyebrow">今日与近期</p><h2 id="overview-task-heading">任务焦点</h2></div><a class="overview-all-link" href="#tasks">查看全部任务 →</a><button class="pixel-button" type="button" data-action="new-task">＋ 新建任务</button></div>
+            <div class="overview-task-list" id="overview-task-list"></div>
+          </section>
+
+          <div class="notice-card">
+            <span class="notice-icon" aria-hidden="true">✦</span>
+            <div><strong>今天，从一小步开始</strong><p>先看今日安排，再从逾期和未来一周的目标里挑出下一步。</p></div>
+            <span class="notice-tag">今日行动</span>
+          </div>
+
+          <div class="section-heading"><div><p class="eyebrow">冒险地图</p><h2>你的工作空间</h2></div><span class="section-caption">选择一个区域，开始探索</span></div>
+          <div class="area-grid" id="area-grid">
+            <a class="area-card area-tasks" href="#tasks"><span class="area-icon" data-pixel-icon="tasks" aria-hidden="true">▤</span><span class="area-arrow" aria-hidden="true">↗</span><span class="area-kicker">任务管理</span><strong>任务列表</strong><span class="area-description">整理主线与日常，逐步推进每个目标。</span><span class="area-footer">进入区域 <span aria-hidden="true">→</span></span></a>
+            <a class="area-card area-board" href="#board"><span class="area-icon" data-pixel-icon="board" aria-hidden="true">▥</span><span class="area-arrow" aria-hidden="true">↗</span><span class="area-kicker">进度视图</span><strong>任务看板</strong><span class="area-description">按进度浏览任务，找到眼下的下一步。</span><span class="area-footer">进入区域 <span aria-hidden="true">→</span></span></a>
+            <a class="area-card area-calendar" href="#calendar"><span class="area-icon" data-pixel-icon="calendar" aria-hidden="true">▦</span><span class="area-arrow" aria-hidden="true">↗</span><span class="area-kicker">时间安排</span><strong>任务日历</strong><span class="area-description">把计划放回日历，看看近期的节奏。</span><span class="area-footer">进入区域 <span aria-hidden="true">→</span></span></a>
+            <a class="area-card area-growth" href="#growth"><span class="area-icon" data-pixel-icon="growth" aria-hidden="true">✳</span><span class="area-arrow" aria-hidden="true">↗</span><span class="area-kicker">角色档案</span><strong>角色成长</strong><span class="area-description">查看成长与经验的记录空间。</span><span class="area-footer">进入区域 <span aria-hidden="true">→</span></span></a>
+            <a class="area-card area-rewards" href="#rewards"><span class="area-icon" data-pixel-icon="rewards" aria-hidden="true">◇</span><span class="area-arrow" aria-hidden="true">↗</span><span class="area-kicker">现实奖励</span><strong>奖励商店</strong><span class="area-description">放入你想为自己预留的现实奖励。</span><span class="area-footer">进入区域 <span aria-hidden="true">→</span></span></a>
+            <a class="area-card area-daily" href="#daily"><span class="area-icon" data-pixel-icon="daily" aria-hidden="true">☼</span><span class="area-arrow" aria-hidden="true">↗</span><span class="area-kicker">每日仪式</span><strong>每日奖励</strong><span class="area-description">为每天的稳定行动留一个小小回馈。</span><span class="area-footer">进入区域 <span aria-hidden="true">→</span></span></a>
+            <a class="area-card area-achievements" href="#achievements"><span class="area-icon" data-pixel-icon="achievements" aria-hidden="true">⚑</span><span class="area-arrow" aria-hidden="true">↗</span><span class="area-kicker">旅途纪念</span><strong>成就收藏</strong><span class="area-description">记录未来值得纪念的每个里程碑。</span><span class="area-footer">进入区域 <span aria-hidden="true">→</span></span></a>
+          </div>
+          <footer class="page-footer"><span>研究牲任务系统</span><span>专注当下，持续前进 <span aria-hidden="true">✦</span></span></footer>
+        </section>
+      </main>
+    </div>
+    <dialog class="task-dialog reward-dialog" id="reward-dialog" aria-labelledby="reward-dialog-title">
+      <form id="reward-form" class="dialog-form">
+        <div class="dialog-heading"><div><p class="eyebrow">现实奖励 · 自定义项目</p><h2 id="reward-dialog-title">添加奖励</h2></div><button class="icon-button" type="button" data-close-dialog="reward-dialog" aria-label="关闭">×</button></div>
+        <input type="hidden" name="id" />
+        <label class="field field-wide">预置奖励灵感（可选）<select name="template"><option value="">自定义奖励</option><option value="tea">奶茶</option><option value="game">游戏时间</option><option value="movie">看电影</option><option value="outing">外出游玩</option></select><span class="field-hint">选择后可修改名称和描述；价格仍由你自行设定。</span></label>
+        <label class="field field-wide">奖励名称 <span class="required-mark">*</span><input name="name" required maxlength="100" placeholder="例如：看一场电影" /></label>
+        <label class="field field-wide">描述（可选）<textarea name="description" rows="3" maxlength="500" placeholder="兑换后给自己的小奖励"></textarea></label>
+        <label class="field field-wide">价格（金币） <span class="required-mark">*</span><input name="price" type="number" min="1" step="1" required placeholder="由你决定" /></label>
+        <p class="form-error" id="reward-form-error" role="alert" hidden></p>
+        <div class="dialog-actions"><button class="pixel-button button-muted" type="button" data-close-dialog="reward-dialog">取消</button><button class="pixel-button" type="submit">保存奖励</button></div>
+      </form>
+    </dialog>
+    <dialog class="task-dialog" id="task-dialog" aria-labelledby="task-dialog-title">
+      <form id="task-form" class="dialog-form">
+        <div class="dialog-heading"><div><p class="eyebrow">任务档案</p><h2 id="task-dialog-title">新建任务</h2></div><button class="icon-button" type="button" data-close-dialog="task-dialog" aria-label="关闭">×</button></div>
+        <input type="hidden" name="id" />
+        <input type="hidden" name="dailyRewardDate" />
+        <input type="hidden" name="dailyRewardTemplateId" />
+        <label class="field field-wide">任务名称 <span class="required-mark">*</span><input name="title" required maxlength="120" placeholder="例如：整理实验数据" /></label>
+        <label class="field field-wide">任务描述<textarea name="description" rows="3" placeholder="补充目标、背景或完成标准"></textarea></label>
+        <div class="form-grid">
+          <label class="field">任务类别<select name="category"><option value="side">支线</option><option value="main">主线</option></select></label>
+          <label class="field" id="branch-field" hidden>主线分支<select name="branch"><option value="">请选择</option><option value="research">科研</option><option value="study">学业</option><option value="career">找工</option></select></label>
+          <label class="field">状态<select name="status"><option value="todo">待办</option><option value="in_progress">进行中</option><option value="paused">搁置</option><option value="completed">已完成</option></select></label>
+          <label class="field" id="completion-percent-field" hidden>完成度评分<input name="completionPercent" type="number" min="0" step="1" placeholder="输入完成度" /><span class="field-hint" id="completion-field-hint">完成度可超过 200%；每日奖励按原值累计，XP/金币奖励最高按 200% 加权。</span></label>
+          <label class="field">重复周期<select name="recurrence"><option value="once" selected>一次性</option><option value="daily">日常</option><option value="weekly">周常</option></select></label>
+          <label class="field">优先级<select name="priority"><option value="normal">普通</option><option value="high">高</option><option value="low">低</option></select></label>
+          <label class="field">稀有度<select name="rarity"><option value="common">普通</option><option value="rare">稀有</option><option value="epic">史诗</option><option value="legendary">传说</option></select></label>
+          <label class="field field-check"><input name="isBoss" type="checkbox" /><span>这是一个 Boss 挑战</span></label>
+          <label class="field field-wide" id="parent-task-field">所属 Boss（可选）<select name="parentId"><option value="">独立任务</option></select><span class="field-hint" id="parent-task-hint">关联顶层 Boss 可将此任务设为子任务；暂不支持子任务嵌套。</span></label>
+          <label class="field">计划日期<input name="plannedDate" type="date" /></label>
+          <label class="field">截止时间<input name="dueAt" type="datetime-local" /></label>
+          <label class="field field-wide">标签（可选）<input name="tags" placeholder="用逗号分隔，例如：某项目名、实验批次" /><span class="field-hint">用于自定义主题或项目；已有明确选项时不必重复添加。</span></label>
+          <fieldset class="field field-wide reward-fields"><legend>完成奖励建议</legend><p>基准奖励按任务类别确定，再乘稀有度、Boss 与重复周期倍率；可自行调整。</p><div class="form-grid"><label class="field">XP<input name="xpReward" type="number" min="0" step="1" required /></label><label class="field">金币<input name="goldReward" type="number" min="0" step="1" required /></label></div><span class="suggestion-note" id="suggestion-note" aria-live="polite"></span></fieldset>
+        </div>
+        <p class="form-error" id="task-form-error" role="alert" hidden></p>
+        <div class="dialog-actions"><button class="pixel-button button-muted" type="button" data-close-dialog="task-dialog">取消</button><button class="pixel-button" type="submit">保存任务</button></div>
+      </form>
+    </dialog>
+    <dialog class="task-dialog detail-dialog" id="detail-dialog" aria-labelledby="detail-title"><div id="detail-content"></div></dialog>
+    <dialog class="task-dialog completion-dialog" id="completion-dialog" aria-labelledby="completion-dialog-title">
+      <form id="completion-form" class="dialog-form">
+        <div class="dialog-heading"><div><p class="eyebrow">完成任务 · 记录你的评价</p><h2 id="completion-dialog-title">任务完成度</h2></div><button class="icon-button" type="button" data-close-dialog="completion-dialog" aria-label="关闭">×</button></div>
+        <input type="hidden" name="taskId" />
+        <p class="completion-task-title" id="completion-task-title"></p>
+        <label class="field">完成度（0% 起）<div class="percent-input"><input name="completionPercent" type="number" min="0" step="1" required placeholder="输入完成度" /><span>%</span></div><span class="field-hint">每日进度使用填写的原始完成度；XP/金币奖励按最高 200% 计算。</span></label>
+        <div class="dialog-actions"><button class="pixel-button button-muted" type="button" data-close-dialog="completion-dialog">取消</button><button class="pixel-button" type="submit">确认完成</button></div>
+      </form>
+    </dialog>
+    <dialog class="task-dialog level-dialog" id="level-dialog" aria-labelledby="level-detail-title"><div id="level-detail-content"></div></dialog>
+    <dialog class="task-dialog" id="achievement-dialog" aria-labelledby="achievement-dialog-title">
+      <form id="achievement-form" class="dialog-form">
+        <div class="dialog-heading"><div><p class="eyebrow">旅途纪念 · 自定义里程碑</p><h2 id="achievement-dialog-title">添加成就</h2></div><button class="icon-button" type="button" data-close-dialog="achievement-dialog" aria-label="关闭">×</button></div>
+        <label class="field field-wide">成就名称 <span class="required-mark">*</span><input name="title" required maxlength="60" placeholder="例如：早起的研究牲" /></label>
+        <label class="field field-wide">成就说明<input name="description" maxlength="180" placeholder="写下达成条件或纪念意义" /></label>
+        <div class="form-grid">
+          <label class="field">成就分类 <span class="required-mark">*</span><input name="category" required maxlength="30" list="achievement-category-options" placeholder="例如：科研" /><datalist id="achievement-category-options"></datalist></label>
+          <label class="field">像素图标<select name="icon"><option value="star">星星</option><option value="flask">烧瓶</option><option value="book">书本</option><option value="briefcase">公文包</option><option value="code">代码</option><option value="heart">爱心</option><option value="boss">Boss</option><option value="coin">金币</option><option value="calendar">日历</option><option value="leaf">叶子</option><option value="target">目标</option><option value="medal">奖章</option></select></label>
+          <label class="field field-wide">解锁条件<select name="kind" required></select><span class="field-hint">使用系统支持的真实任务或兑换记录计算进度。</span></label>
+          <label class="field field-wide" id="achievement-tags-field" hidden>匹配标签<input name="tags" maxlength="160" placeholder="用逗号分隔，例如：编程、算法" /><span class="field-hint">只统计完成任务时包含至少一个指定标签的任务。</span></label>
+          <label class="field field-wide">达成数量 <span class="required-mark">*</span><input name="target" type="number" min="1" max="1000000" step="1" required value="1" /></label>
+        </div>
+        <p class="form-error" id="achievement-form-error" role="alert" hidden></p>
+        <div class="dialog-actions"><button class="pixel-button button-muted" type="button" data-close-dialog="achievement-dialog">取消</button><button class="pixel-button" type="submit">保存成就</button></div>
+      </form>
+    </dialog>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>
