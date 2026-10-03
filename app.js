@@ -278,6 +278,24 @@ function displayLevel(level) {
   return level > 999 ? '999+' : String(level);
 }
 
+function levelUpNotice(previousLevel, currentLevel) {
+  const gained = currentLevel - previousLevel;
+  if (gained <= 0) return '';
+  const prefix = gained > 1 ? `连续升级 ${gained} 级！` : '升级！';
+  const detail = currentLevel > 999
+    ? '当前显示等级为 999+，点击等级可查看详细等级。'
+    : `当前等级：LV ${currentLevel}。`;
+  return `${prefix}${detail}`;
+}
+
+function showCompletionFeedback(taskNotice, levelNotice) {
+  const message = levelNotice ? `${taskNotice} ${levelNotice}` : taskNotice;
+  // Achievement unlock feedback is scheduled just after saving; let the more
+  // important level-up summary appear after it so neither notice is lost.
+  if (levelNotice) window.setTimeout(() => showToast(message), 120);
+  else showToast(message);
+}
+
 function showLevelDetails() {
   const total = economyTotals();
   const level = RewardRules.levelInfo(total.xp);
@@ -1145,14 +1163,19 @@ function submitTask(event) {
     nextEconomy = outcome.economy;
     awardedNow = outcome.awarded;
   }
+  const levelBefore = RewardRules.levelInfo(economyTotals(economy).xp).level;
+  const levelAfter = RewardRules.levelInfo(economyTotals(nextEconomy).xp).level;
+  const levelNotice = awardedNow ? levelUpNotice(levelBefore, levelAfter) : '';
   const nextTasks = id ? tasks.map((task) => task.id === id ? next : task) : [...tasks, next];
   if (!persistTasks(nextTasks, nextEconomy)) return;
   taskDialog.close();
   refreshTaskView();
   const award = nextEconomy.ledger.find((entry) => entry.taskId === next.id);
-  if (awardedNow) playUiSound('complete');
+  if (levelNotice) playUiSound('level-up');
+  else if (awardedNow) playUiSound('complete');
   else playUiSound(id ? 'save' : 'create');
-  showToast(awardedNow ? `任务已完成（${next.completionPercent}%），获得 ${award.xpDelta} XP 和 ${award.goldDelta} 金币。` : id ? '任务已保存，进展记录已保留。' : '任务已创建。');
+  const taskNotice = awardedNow ? `任务已完成（${next.completionPercent}%），获得 ${award.xpDelta} XP 和 ${award.goldDelta} 金币。` : id ? '任务已保存，进展记录已保留。' : '任务已创建。';
+  showCompletionFeedback(taskNotice, levelNotice);
 }
 
 function detailRows(task) {
@@ -1268,6 +1291,9 @@ function completeTask(id, completionPercent) {
   const now = new Date().toISOString();
   const updated = { ...previous, status: 'completed', completionPercent, completedAt: now, updatedAt: now };
   const outcome = registerFirstCompletion(updated, previous, economy);
+  const levelBefore = RewardRules.levelInfo(economyTotals(economy).xp).level;
+  const levelAfter = RewardRules.levelInfo(economyTotals(outcome.economy).xp).level;
+  const levelNotice = outcome.awarded ? levelUpNotice(levelBefore, levelAfter) : '';
   const nextTasks = tasks.map((task) => task.id === id ? outcome.task : task);
   if (!persistTasks(nextTasks, outcome.economy)) return;
   completionDialog.close();
@@ -1275,8 +1301,10 @@ function completeTask(id, completionPercent) {
   if (location.hash === '#board') [...document.querySelectorAll('[data-board-status]')].find((select) => select.dataset.id === id)?.focus();
   if (detailDialog.open && activeDetailId === id) renderDetail(id);
   const award = outcome.economy.ledger.find((entry) => entry.taskId === id);
-  if (outcome.awarded) playUiSound('complete');
-  showToast(outcome.awarded ? `任务完成度 ${completionPercent}%，获得 ${award.xpDelta} XP 和 ${award.goldDelta} 金币。` : '任务已完成；此任务不会重复发放奖励。');
+  if (levelNotice) playUiSound('level-up');
+  else if (outcome.awarded) playUiSound('complete');
+  const taskNotice = outcome.awarded ? `任务完成度 ${completionPercent}%，获得 ${award.xpDelta} XP 和 ${award.goldDelta} 金币。` : '任务已完成；此任务不会重复发放奖励。';
+  showCompletionFeedback(taskNotice, levelNotice);
 }
 
 function submitCompletion(event) {
