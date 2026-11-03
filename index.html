@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#f6f5f1" />
-    <title>研究牲任务系统</title>
+    <title>重生之研究牲任务系统 V0.3</title>
     <link rel="stylesheet" href="styles.css" />
     <script src="reward-rules.js" defer></script>
     <script src="daily-reward-rules.js" defer></script>
@@ -78,7 +78,7 @@
           <div class="notice-card">
             <span class="notice-icon" aria-hidden="true">✦</span>
             <div><strong>今天，从一小步开始</strong><p>先看今日安排，再从逾期和未来一周的目标里挑出下一步。</p></div>
-            <span class="notice-tag">今日行动</span>
+            <a class="notice-tag" href="#daily">每日任务 · 快速入口 →</a>
           </div>
 
           <div class="section-heading"><div><p class="eyebrow">冒险地图</p><h2>你的工作空间</h2></div><span class="section-caption">选择一个区域，开始探索</span></div>
@@ -91,7 +91,7 @@
             <a class="area-card area-daily" href="#daily"><span class="area-icon" data-pixel-icon="daily" aria-hidden="true">☼</span><span class="area-arrow" aria-hidden="true">↗</span><span class="area-kicker">每日仪式</span><strong>每日奖励</strong><span class="area-description">为每天的稳定行动留一个小小回馈。</span><span class="area-footer">进入区域 <span aria-hidden="true">→</span></span></a>
             <a class="area-card area-achievements" href="#achievements"><span class="area-icon" data-pixel-icon="achievements" aria-hidden="true">⚑</span><span class="area-arrow" aria-hidden="true">↗</span><span class="area-kicker">旅途纪念</span><strong>成就收藏</strong><span class="area-description">记录未来值得纪念的每个里程碑。</span><span class="area-footer">进入区域 <span aria-hidden="true">→</span></span></a>
           </div>
-          <footer class="page-footer"><span>研究牲任务系统</span><span>专注当下，持续前进 <span aria-hidden="true">✦</span></span></footer>
+          <footer class="page-footer"><span>研究牲任务系统 · V0.3</span><span>专注当下，持续前进 <span aria-hidden="true">✦</span></span></footer>
         </section>
       </main>
     </div>
@@ -99,13 +99,28 @@
       <form id="reward-form" class="dialog-form">
         <div class="dialog-heading"><div><p class="eyebrow">现实奖励 · 自定义项目</p><h2 id="reward-dialog-title">添加奖励</h2></div><button class="icon-button" type="button" data-close-dialog="reward-dialog" aria-label="关闭">×</button></div>
         <input type="hidden" name="id" />
-        <label class="field field-wide">预置奖励灵感（可选）<select name="template"><option value="">自定义奖励</option><option value="tea">奶茶</option><option value="game">游戏时间</option><option value="movie">看电影</option><option value="outing">外出游玩</option></select><span class="field-hint">选择后可修改名称和描述；价格仍由你自行设定。</span></label>
+        <label class="field field-wide">预置奖励灵感（可选）<select name="template"><option value="">自定义奖励</option><option value="tea">奶茶</option><option value="game">游戏时间</option><option value="movie">看电影</option><option value="outing">外出游玩</option></select></label>
         <label class="field field-wide">奖励名称 <span class="required-mark">*</span><input name="name" required maxlength="100" placeholder="例如：看一场电影" /></label>
         <label class="field field-wide">描述（可选）<textarea name="description" rows="3" maxlength="500" placeholder="兑换后给自己的小奖励"></textarea></label>
         <label class="field field-wide">价格（金币） <span class="required-mark">*</span><input name="price" type="number" min="1" step="1" required placeholder="由你决定" /></label>
         <p class="form-error" id="reward-form-error" role="alert" hidden></p>
         <div class="dialog-actions"><button class="pixel-button button-muted" type="button" data-close-dialog="reward-dialog">取消</button><button class="pixel-button" type="submit">保存奖励</button></div>
       </form>
+    </dialog>
+    <dialog class="task-dialog boss-children-dialog" id="boss-children-choice" aria-labelledby="boss-children-choice-title">
+      <div class="dialog-form">
+        <div class="dialog-heading"><div><p class="eyebrow">Boss 挑战 · 子任务</p><h2 id="boss-children-choice-title">处理子任务</h2></div><button class="icon-button" type="button" data-action="boss-children-cancel" aria-label="关闭">×</button></div>
+        <p id="boss-children-choice-copy" class="template-intro"></p>
+        <div id="boss-children-choice-list" class="boss-children-choice-list"></div>
+        <div class="dialog-actions"><button class="pixel-button button-muted" type="button" data-action="boss-children-cancel">取消</button><button class="pixel-button button-muted" id="boss-children-skip" type="button" data-action="boss-children-skip">不保留子任务</button><button class="pixel-button" id="boss-children-keep" type="button" data-action="boss-children-keep">保留子任务并继续</button></div>
+      </div>
+    </dialog>
+    <dialog class="task-dialog task-template-dialog" id="task-template-dialog" aria-labelledby="task-template-title">
+      <div class="dialog-form">
+        <div class="dialog-heading"><div><p class="eyebrow">快捷创建 · 本地保存</p><h2 id="task-template-title">任务模板</h2></div><button class="icon-button" type="button" data-close-dialog="task-template-dialog" aria-label="关闭">×</button></div>
+        <div class="task-template-list" id="task-template-list"></div>
+        <div class="dialog-actions"><button class="pixel-button button-muted" type="button" data-close-dialog="task-template-dialog">关闭</button><button class="pixel-button" type="button" data-action="new-task-template">＋ 创建模板</button></div>
+      </div>
     </dialog>
     <dialog class="task-dialog" id="task-dialog" aria-labelledby="task-dialog-title">
       <form id="task-form" class="dialog-form">
@@ -115,6 +130,7 @@
         <input type="hidden" name="dailyRewardTemplateId" />
         <label class="field field-wide">任务名称 <span class="required-mark">*</span><input name="title" required maxlength="120" placeholder="例如：整理实验数据" /></label>
         <label class="field field-wide">任务描述<textarea name="description" rows="3" placeholder="补充目标、背景或完成标准"></textarea></label>
+        <section class="task-goal-editor field-wide" aria-labelledby="task-goal-editor-title"><div class="task-goal-editor-heading"><div><h3 id="task-goal-editor-title">任务目标</h3><p>写下具体要做的事项；保存后可在目标悬浮窗逐项勾选。</p></div><button class="pixel-button button-muted" type="button" data-action="add-task-goal">＋ 添加目标</button></div><div id="task-goal-list"></div></section>
         <div class="form-grid">
           <label class="field">任务类别<select name="category"><option value="side">支线</option><option value="main">主线</option></select></label>
           <label class="field" id="branch-field" hidden>主线分支<select name="branch"><option value="">请选择</option><option value="research">科研</option><option value="study">学业</option><option value="career">找工</option></select></label>
@@ -124,17 +140,23 @@
           <label class="field">优先级<select name="priority"><option value="normal">普通</option><option value="high">高</option><option value="low">低</option></select></label>
           <label class="field">稀有度<select name="rarity"><option value="common">普通</option><option value="rare">稀有</option><option value="epic">史诗</option><option value="legendary">传说</option></select></label>
           <label class="field field-check"><input name="isBoss" type="checkbox" /><span>这是一个 Boss 挑战</span></label>
-          <label class="field field-wide" id="parent-task-field">所属 Boss（可选）<select name="parentId"><option value="">独立任务</option></select><span class="field-hint" id="parent-task-hint">关联顶层 Boss 可将此任务设为子任务；暂不支持子任务嵌套。</span></label>
+          <label class="field field-wide" id="parent-task-field">所属 Boss（可选）<select name="parentId"><option value="">独立任务</option></select></label>
           <label class="field">计划日期<input name="plannedDate" type="date" /></label>
-          <label class="field">截止时间<input name="dueAt" type="datetime-local" /></label>
-          <label class="field field-wide">标签（可选）<input name="tags" placeholder="用逗号分隔，例如：某项目名、实验批次" /><span class="field-hint">用于自定义主题或项目；已有明确选项时不必重复添加。</span></label>
+          <label class="field"><span id="due-at-label">截止时间</span><input name="dueAt" type="datetime-local" /></label>
+          <label class="field field-wide">标签（可选）<input name="tags" placeholder="用逗号分隔，例如：某项目名、实验批次" /></label>
           <fieldset class="field field-wide reward-fields"><legend>完成奖励建议</legend><p>基准奖励按任务类别确定，再乘稀有度、Boss 与重复周期倍率；可自行调整。</p><div class="form-grid"><label class="field">XP<input name="xpReward" type="number" min="0" step="1" required /></label><label class="field">金币<input name="goldReward" type="number" min="0" step="1" required /></label></div><span class="suggestion-note" id="suggestion-note" aria-live="polite"></span></fieldset>
         </div>
+        <section class="template-child-editor" id="template-children-section" hidden aria-labelledby="template-children-heading">
+          <div class="section-heading"><div><p class="eyebrow">Boss 模板内容</p><h3 id="template-children-heading">子任务模板</h3></div><button class="pixel-button button-muted" type="button" data-action="template-child-add">＋ 添加子任务</button></div>
+          <p class="field-hint">可编辑子任务内容和奖励。套用 Boss 模板时会同时创建这些子任务；日期和后续刷新周期跟随 Boss。</p>
+          <div class="template-child-list" id="template-child-list"></div>
+        </section>
         <p class="form-error" id="task-form-error" role="alert" hidden></p>
         <div class="dialog-actions"><button class="pixel-button button-muted" type="button" data-close-dialog="task-dialog">取消</button><button class="pixel-button" type="submit">保存任务</button></div>
       </form>
     </dialog>
     <dialog class="task-dialog detail-dialog" id="detail-dialog" aria-labelledby="detail-title"><div id="detail-content"></div></dialog>
+    <dialog class="task-goals-window" id="task-goals-window" aria-labelledby="task-goals-window-title"><div id="task-goals-window-content"></div></dialog>
     <dialog class="task-dialog completion-dialog" id="completion-dialog" aria-labelledby="completion-dialog-title">
       <form id="completion-form" class="dialog-form">
         <div class="dialog-heading"><div><p class="eyebrow">完成任务 · 记录你的评价</p><h2 id="completion-dialog-title">任务完成度</h2></div><button class="icon-button" type="button" data-close-dialog="completion-dialog" aria-label="关闭">×</button></div>
@@ -152,8 +174,8 @@
         <label class="field field-wide">成就说明<input name="description" maxlength="180" placeholder="写下达成条件或纪念意义" /></label>
         <div class="form-grid">
           <label class="field">成就分类 <span class="required-mark">*</span><input name="category" required maxlength="30" list="achievement-category-options" placeholder="例如：科研" /><datalist id="achievement-category-options"></datalist></label>
-          <label class="field">像素图标<select name="icon"><option value="star">星星</option><option value="flask">烧瓶</option><option value="book">书本</option><option value="briefcase">公文包</option><option value="code">代码</option><option value="heart">爱心</option><option value="boss">Boss</option><option value="coin">金币</option><option value="calendar">日历</option><option value="leaf">叶子</option><option value="target">目标</option><option value="medal">奖章</option></select></label>
-          <label class="field field-wide">解锁条件<select name="kind" required></select><span class="field-hint">使用系统支持的真实任务或兑换记录计算进度。</span></label>
+          <label class="field">像素图标<div class="achievement-icon-picker"><select name="icon"><option value="star">星星</option><option value="flask">烧瓶</option><option value="book">书本</option><option value="briefcase">公文包</option><option value="code">代码</option><option value="heart">爱心</option><option value="boss">Boss</option><option value="coin">金币</option><option value="calendar">日历</option><option value="leaf">叶子</option><option value="target">目标</option><option value="medal">奖章</option></select><span class="achievement-icon-preview" id="achievement-icon-preview" aria-hidden="true"></span></div></label>
+          <label class="field field-wide">解锁条件<select name="kind" required></select></label>
           <label class="field field-wide" id="achievement-tags-field" hidden>匹配标签<input name="tags" maxlength="160" placeholder="用逗号分隔，例如：编程、算法" /><span class="field-hint">只统计完成任务时包含至少一个指定标签的任务。</span></label>
           <label class="field field-wide">达成数量 <span class="required-mark">*</span><input name="target" type="number" min="1" max="1000000" step="1" required value="1" /></label>
         </div>

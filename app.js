@@ -22,6 +22,7 @@ const pageTitle = document.querySelector('#current-section');
 const navLinks = [...document.querySelectorAll('.nav-link')];
 const taskDialog = document.querySelector('#task-dialog');
 const detailDialog = document.querySelector('#detail-dialog');
+const taskGoalsWindow = document.querySelector('#task-goals-window');
 const taskForm = document.querySelector('#task-form');
 const completionDialog = document.querySelector('#completion-dialog');
 const completionForm = document.querySelector('#completion-form');
@@ -33,6 +34,7 @@ const toast = document.querySelector('#toast');
 let storageLoadFailed = false;
 let state = loadState();
 let tasks = state.tasks;
+let taskTemplates = state.taskTemplates;
 let economy = state.economy;
 let calendarMoods = state.calendarMoods;
 let rewards = state.rewards;
@@ -44,8 +46,21 @@ let activeDetailId = null;
 let returnToDetailAfterTaskDialog = null;
 let toastTimer;
 let dailyPageTimer;
+let recurrenceRefreshTimer;
+let pendingTaskGoals = [];
+let activeGoalsTaskId = null;
+let goalsWindowPinned = false;
+let goalsPipWindow = null;
+let goalsPipReturnToInline = false;
+let goalDraft = null;
 let suggestionTouched = { xp: false, gold: false };
+let taskFormMode = 'task';
+let editingTemplateId = '';
+let pendingTemplateChildren = [];
+let pendingBossChildrenAction = null;
 const taskFilters = { status: '', category: '', branch: '', rarity: '', recurrence: '', boss: '', priority: '', tag: '', dateFrom: '', dateTo: '', sort: 'planned-asc' };
+const boardFilters = { category: '', branch: '', date: 'today', status: 'all' };
+const ledgerFilters = { category: '', dateFrom: '', dateTo: '' };
 let taskFiltersAdvancedOpen = false;
 let calendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
 let calendarSelectedDate = localDateKey(new Date());
@@ -56,14 +71,18 @@ function normaliseTasks(inputTasks, isLegacy = false) {
     const preservedTask = { ...task };
     delete preservedTask.difficulty;
     const legacyCompleted = isLegacy && task.status === 'completed';
+    const goalHistory = reconcileTaskGoalRecords(normaliseTaskGoals(task.goals), Array.isArray(task.logs) ? task.logs : []);
     return {
       ...preservedTask,
       parentId: typeof task.parentId === 'string' ? task.parentId : '',
-      recurrence: task.recurrence === 'monthly' ? 'once' : (task.recurrence || 'once'),
+      recurrence: ['daily', 'weekly'].includes(task.recurrence) ? task.recurrence : 'once',
+      recurrenceSeriesId: task.recurrenceSeriesId || (['daily', 'weekly'].includes(task.recurrence) ? task.id : ''),
+      occurrenceDate: task.occurrenceDate || (['daily', 'weekly'].includes(task.recurrence) ? taskOccurrenceDate(task) : ''),
+      goals: goalHistory.goals,
       completionPercent: task.completionPercent == null ? null : (Number.isSafeInteger(Number(task.completionPercent)) && Number(task.completionPercent) >= 0 ? Number(task.completionPercent) : null),
       xpReward: task.xpReward ?? 0,
       goldReward: task.goldReward ?? 0,
-      logs: Array.isArray(task.logs) ? task.logs : [],
+      logs: goalHistory.logs,
       rewardGrantedAt: task.rewardGrantedAt ?? (legacyCompleted ? (task.completedAt || task.updatedAt || task.createdAt || null) : null),
       rewardSkippedLegacy: task.rewardSkippedLegacy ?? legacyCompleted,
     };
@@ -75,6 +94,188 @@ function normaliseTasks(inputTasks, isLegacy = false) {
       ? { ...task, parentId: '' }
       : task;
   });
+}
+
+function normaliseTaskTemplates(inputTemplates) {
+  if (!Array.isArray(inputTemplates)) return [];
+  const seen = new Set();
+  const normalizeEntry = (item, withChildren = true) => {
+    if (!item || typeof item.id !== 'string' || typeof item.title !== 'string' || !item.title.trim()) return null;
+    return {
+      id: item.id,
+      title: item.title.trim().slice(0, 120),
+      description: String(item.description || ''),
+      category: item.category === 'main' ? 'main' : 'side',
+      branch: item.category === 'main' && branchLabels[item.branch] ? item.branch : '',
+      recurrence: ['daily', 'weekly'].includes(item.recurrence) ? item.recurrence : 'once',
+      priority: ['high', 'low'].includes(item.priority) ? item.priority : 'normal',
+      rarity: ['rare', 'epic', 'legendary'].includes(item.rarity) ? item.rarity : 'common',
+      dueTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(item.dueTime) ? item.dueTime : '23:59',
+      isBoss: Boolean(item.isBoss),
+      tags: Array.isArray(item.tags) ? item.tags.map((tag) => String(tag).trim()).filter(Boolean) : [],
+      goals: normaliseTemplateGoals(item.goals),
+      xpReward: Math.max(0, Math.floor(Number(item.xpReward) || 0)),
+      goldReward: Math.max(0, Math.floor(Number(item.goldReward) || 0)),
+      createdAt: item.createdAt || new Date().toISOString(),
+      updatedAt: item.updatedAt || item.createdAt || new Date().toISOString(),
+      ...(withChildren ? { children: item.isBoss && Array.isArray(item.children) ? item.children.map((child) => normalizeEntry(child, false)).filter(Boolean) : [] } : {}),
+    };
+  };
+  return inputTemplates.filter((item) => item && typeof item.id === 'string' && !seen.has(item.id) && typeof item.title === 'string' && item.title.trim()).map((item) => {
+    seen.add(item.id);
+    return normalizeEntry(item);
+  }).filter(Boolean);
+}
+
+function normaliseTemplateGoals(inputGoals) {
+  if (!Array.isArray(inputGoals)) return [];
+  return inputGoals.map((goal) => String(typeof goal === 'string' ? goal : goal?.text || '').trim().slice(0, 200)).filter(Boolean);
+}
+
+function normaliseTaskGoals(inputGoals) {
+  if (!Array.isArray(inputGoals)) return [];
+  const seen = new Set();
+  return inputGoals.map((goal) => {
+    const text = String(typeof goal === 'string' ? goal : goal?.text || '').trim().slice(0, 200);
+    if (!text) return null;
+    let id = typeof goal?.id === 'string' && goal.id ? goal.id : createUniqueId();
+    if (seen.has(id)) id = createUniqueId();
+    seen.add(id);
+    const validTime = (value) => value && !Number.isNaN(new Date(value).getTime()) ? value : null;
+    const lastCompletedAt = validTime(goal?.lastCompletedAt) || validTime(goal?.completedAt);
+    const isComplete = typeof goal?.isComplete === 'boolean' ? goal.isComplete : Boolean(validTime(goal?.completedAt));
+    return { id, text, isComplete, lastCompletedAt };
+  }).filter(Boolean).slice(0, 50);
+}
+
+function reconcileTaskGoalRecords(goals, inputLogs) {
+  const logs = Array.isArray(inputLogs) ? inputLogs : [];
+  const consumed = new Set();
+  const goalRecords = [];
+  const nextGoals = goals.map((goal) => {
+    const matchingIndices = [];
+    logs.forEach((log, index) => {
+      const content = String(log?.content || '');
+      const ownsById = log?.goalId === goal.id;
+      const legacyMatch = !log?.goalId && (content === `完成目标：${goal.text}` || content === `重新打开目标：${goal.text}`);
+      if (!consumed.has(index) && (ownsById || legacyMatch)) matchingIndices.push(index);
+    });
+    matchingIndices.forEach((index) => consumed.add(index));
+    const completedLogs = matchingIndices.map((index) => logs[index]).filter((log) => String(log?.content || '').startsWith('完成目标：') && log.createdAt && !Number.isNaN(new Date(log.createdAt).getTime()));
+    const latestLog = [...completedLogs].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+    const lastCompletedAt = goal.lastCompletedAt || latestLog?.createdAt || null;
+    if (!lastCompletedAt) return goal;
+    const sourceLog = latestLog || matchingIndices.map((index) => logs[index]).find((log) => log?.goalId === goal.id);
+    goalRecords.push({ ...(sourceLog || {}), id: sourceLog?.id || createUniqueId(), goalId: goal.id, content: `完成目标：${goal.text}`, createdAt: lastCompletedAt });
+    return { ...goal, lastCompletedAt };
+  });
+  return { goals: nextGoals, logs: [...logs.filter((_, index) => !consumed.has(index)), ...goalRecords] };
+}
+
+function defaultEndOfDayDateTime() {
+  return todayDateTimeLocal('23:59');
+}
+
+function todayDateTimeLocal(time = '23:59') {
+  return `${localDateKey(new Date())}T${/^([01]\d|2[0-3]):[0-5]\d$/.test(time) ? time : '23:59'}`;
+}
+
+function isDateKey(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function taskOccurrenceDate(task) {
+  if (isDateKey(task.occurrenceDate)) return task.occurrenceDate;
+  const planned = isDateKey(task.plannedDate) ? task.plannedDate : '';
+  const created = task.createdAt ? localDateKey(new Date(task.createdAt)) : '';
+  if (planned && created) return planned > created ? planned : created;
+  return planned || created || localDateKey(new Date());
+}
+
+function shiftLocalDate(dateKey, dayOffset) {
+  const [year, month, day] = dateKey.split('-').map(Number);
+  const date = new Date(year, month - 1, day + dayOffset);
+  return localDateKey(date);
+}
+
+function recurringOccurrenceId(seriesId, dateKey) {
+  return `recurring-${encodeURIComponent(seriesId)}-${dateKey}`;
+}
+
+function createRecurringOccurrence(template, dateKey, seriesId, id, parentId = '') {
+  const now = new Date().toISOString();
+  const localDue = formatDateTimeLocalInput(template.dueAt);
+  const dueTime = localDue.includes('T') ? localDue.slice(11) : '';
+  return {
+    ...template,
+    id,
+    status: 'todo',
+    recurrence: parentId ? 'once' : template.recurrence,
+    recurrenceSeriesId: parentId ? '' : seriesId,
+    occurrenceDate: parentId ? '' : dateKey,
+    parentId,
+    plannedDate: dateKey,
+    dueAt: dueTime ? new Date(`${dateKey}T${dueTime}`).toISOString() : '',
+    completionPercent: null,
+    completedAt: null,
+    rewardGrantedAt: null,
+    rewardSkippedLegacy: false,
+    logs: [],
+    goals: normaliseTaskGoals(template.goals).map((goal) => ({ ...goal, id: createUniqueId(), isComplete: false, lastCompletedAt: null })),
+    dailyRewardDate: '',
+    dailyRewardTemplateId: '',
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function generateDueRecurringTasks(sourceTasks, today = localDateKey(new Date())) {
+  const result = [...sourceTasks];
+  const tasksById = new Map(result.map((task) => [task.id, task]));
+  const childrenByParent = new Map();
+  const series = new Map();
+  for (const task of sourceTasks) {
+    if (task.parentId) {
+      if (!childrenByParent.has(task.parentId)) childrenByParent.set(task.parentId, []);
+      childrenByParent.get(task.parentId).push(task);
+      continue;
+    }
+    const seriesId = task.recurrenceSeriesId || (['daily', 'weekly'].includes(task.recurrence) ? task.id : '');
+    if (!seriesId) continue;
+    if (!series.has(seriesId)) series.set(seriesId, []);
+    series.get(seriesId).push(task);
+  }
+
+  for (const [seriesId, instances] of series) {
+    let latest = [...instances].sort((a, b) => taskOccurrenceDate(a).localeCompare(taskOccurrenceDate(b)) || String(a.updatedAt || '').localeCompare(String(b.updatedAt || ''))).at(-1);
+    if (!latest || !['daily', 'weekly'].includes(latest.recurrence)) continue;
+    let nextDate = shiftLocalDate(taskOccurrenceDate(latest), latest.recurrence === 'daily' ? 1 : 7);
+    while (nextDate <= today) {
+      const occurrenceId = recurringOccurrenceId(seriesId, nextDate);
+      if (!tasksById.has(occurrenceId)) {
+        const parent = createRecurringOccurrence(latest, nextDate, seriesId, occurrenceId);
+        result.push(parent);
+        tasksById.set(parent.id, parent);
+        const children = childrenByParent.get(latest.id) || [];
+        const newChildren = [];
+        children.forEach((child) => {
+          const childId = `${occurrenceId}-child-${encodeURIComponent(child.id)}`;
+          if (!tasksById.has(childId)) {
+            const childOccurrence = createRecurringOccurrence(child, nextDate, '', childId, parent.id);
+            result.push(childOccurrence);
+            tasksById.set(childOccurrence.id, childOccurrence);
+            newChildren.push(childOccurrence);
+          }
+        });
+        childrenByParent.set(parent.id, newChildren);
+        latest = parent;
+      } else {
+        latest = tasksById.get(occurrenceId) || latest;
+      }
+      nextDate = shiftLocalDate(nextDate, latest.recurrence === 'daily' ? 1 : 7);
+    }
+  }
+  return result;
 }
 
 function normaliseCalendarMoods(input) {
@@ -168,39 +369,54 @@ function loadState() {
     if (projectData.available && projectData.error) {
       storageLoadFailed = true;
       showToast(`${projectData.error}，已暂停写入以保护数据。`);
-      return { tasks: [], economy: { ledger: [] }, calendarMoods: {}, rewards: [], dailyRewardClaims: [], customAchievements: [], achievementUnlocks: [], soundEnabled: false };
+      return { tasks: [], taskTemplates: [], economy: { ledger: [] }, calendarMoods: {}, rewards: [], dailyRewardClaims: [], customAchievements: [], achievementUnlocks: [], soundEnabled: false };
     }
     if (projectData.available && projectData.state) {
       const parsed = projectData.state;
       if (Array.isArray(parsed.tasks)) {
         const savedCustom = normaliseCustomAchievements(parsed.customAchievements);
-        return { tasks: normaliseTasks(parsed.tasks), economy: { ledger: normaliseLedger(parsed.economy?.ledger) }, calendarMoods: normaliseCalendarMoods(parsed.calendarMoods), rewards: normaliseRewards(parsed.rewards), dailyRewardClaims: normaliseDailyRewardClaims(parsed.dailyRewardClaims), customAchievements: savedCustom, achievementUnlocks: normaliseAchievementUnlocks(parsed.achievementUnlocks, savedCustom), soundEnabled: parsed.soundEnabled === true };
+        return { tasks: normaliseTasks(parsed.tasks), taskTemplates: normaliseTaskTemplates(parsed.taskTemplates), economy: { ledger: normaliseLedger(parsed.economy?.ledger) }, calendarMoods: normaliseCalendarMoods(parsed.calendarMoods), rewards: normaliseRewards(parsed.rewards), dailyRewardClaims: normaliseDailyRewardClaims(parsed.dailyRewardClaims), customAchievements: savedCustom, achievementUnlocks: normaliseAchievementUnlocks(parsed.achievementUnlocks, savedCustom), soundEnabled: parsed.soundEnabled === true };
       }
       storageLoadFailed = true;
       showToast('项目目录中的数据结构无效，已暂停写入以保护数据。');
-      return { tasks: [], economy: { ledger: [] }, calendarMoods: {}, rewards: [], dailyRewardClaims: [], customAchievements: [], achievementUnlocks: [], soundEnabled: false };
+      return { tasks: [], taskTemplates: [], economy: { ledger: [] }, calendarMoods: {}, rewards: [], dailyRewardClaims: [], customAchievements: [], achievementUnlocks: [], soundEnabled: false };
     }
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       const parsed = JSON.parse(saved);
       if (parsed && Array.isArray(parsed.tasks)) {
         const savedCustom = normaliseCustomAchievements(parsed.customAchievements);
-        return { tasks: normaliseTasks(parsed.tasks), economy: { ledger: normaliseLedger(parsed.economy?.ledger) }, calendarMoods: normaliseCalendarMoods(parsed.calendarMoods), rewards: normaliseRewards(parsed.rewards), dailyRewardClaims: normaliseDailyRewardClaims(parsed.dailyRewardClaims), customAchievements: savedCustom, achievementUnlocks: normaliseAchievementUnlocks(parsed.achievementUnlocks, savedCustom), soundEnabled: parsed.soundEnabled === true };
+        return { tasks: normaliseTasks(parsed.tasks), taskTemplates: normaliseTaskTemplates(parsed.taskTemplates), economy: { ledger: normaliseLedger(parsed.economy?.ledger) }, calendarMoods: normaliseCalendarMoods(parsed.calendarMoods), rewards: normaliseRewards(parsed.rewards), dailyRewardClaims: normaliseDailyRewardClaims(parsed.dailyRewardClaims), customAchievements: savedCustom, achievementUnlocks: normaliseAchievementUnlocks(parsed.achievementUnlocks, savedCustom), soundEnabled: parsed.soundEnabled === true };
       }
       throw new Error('Invalid saved application state');
     }
     const legacy = JSON.parse(localStorage.getItem(LEGACY_STORAGE_KEY) || '[]');
-    return { tasks: normaliseTasks(legacy, true), economy: { ledger: [] }, calendarMoods: {}, rewards: [], dailyRewardClaims: [], customAchievements: [], achievementUnlocks: [], soundEnabled: false };
+    return { tasks: normaliseTasks(legacy, true), taskTemplates: [], economy: { ledger: [] }, calendarMoods: {}, rewards: [], dailyRewardClaims: [], customAchievements: [], achievementUnlocks: [], soundEnabled: false };
   } catch {
     storageLoadFailed = true;
     showToast('本地任务数据无法读取，请检查浏览器存储空间。');
-    return { tasks: [], economy: { ledger: [] }, calendarMoods: {}, rewards: [], dailyRewardClaims: [], customAchievements: [], achievementUnlocks: [], soundEnabled: false };
+    return { tasks: [], taskTemplates: [], economy: { ledger: [] }, calendarMoods: {}, rewards: [], dailyRewardClaims: [], customAchievements: [], achievementUnlocks: [], soundEnabled: false };
   }
+}
+
+function longestCompletionStreak(sourceTasks) {
+  const dates = [...new Set(sourceTasks.filter((task) => task.status === 'completed' && task.completedAt && !Number.isNaN(new Date(task.completedAt).getTime())).map((task) => localDateKey(new Date(task.completedAt))))].sort();
+  let best = 0;
+  let streak = 0;
+  let previousTimestamp = null;
+  for (const date of dates) {
+    const timestamp = Date.parse(`${date}T00:00:00Z`);
+    streak = previousTimestamp != null && timestamp - previousTimestamp === 86400000 ? streak + 1 : 1;
+    best = Math.max(best, streak);
+    previousTimestamp = timestamp;
+  }
+  return best;
 }
 
 function achievementProgress(definition, sourceTasks, sourceEconomy, sourceDailyClaims = dailyRewardClaims) {
   const completed = sourceTasks.filter((task) => task.status === 'completed');
   if (definition.kind === 'completed-tasks') return completed.length;
+  if (definition.kind === 'side-tasks') return completed.filter((task) => task.category === 'side').length;
   if (definition.kind === 'research-tasks') return completed.filter((task) => task.category === 'main' && task.branch === 'research').length;
   if (definition.kind === 'study-tasks') return completed.filter((task) => task.category === 'main' && task.branch === 'study').length;
   if (definition.kind === 'career-tasks') return completed.filter((task) => task.category === 'main' && task.branch === 'career').length;
@@ -208,8 +424,26 @@ function achievementProgress(definition, sourceTasks, sourceEconomy, sourceDaily
   if (definition.kind === 'completed-bosses') return completed.filter((task) => task.isBoss).length;
   if (definition.kind === 'completed-subtasks') return completed.filter((task) => Boolean(task.parentId)).length;
   if (definition.kind === 'completed-days') return new Set(completed.filter((task) => task.completedAt && !Number.isNaN(new Date(task.completedAt).getTime())).map((task) => localDateKey(new Date(task.completedAt)))).size;
+  if (definition.kind === 'streak-days') return longestCompletionStreak(sourceTasks);
+  if (definition.kind === 'all-main-branches') return new Set(completed.filter((task) => task.category === 'main' && branchLabels[task.branch]).map((task) => task.branch)).size === Object.keys(branchLabels).length ? 1 : 0;
+  if (definition.kind === 'epic-tasks') return completed.filter((task) => ['epic', 'legendary'].includes(task.rarity)).length;
+  if (definition.kind === 'legendary-tasks') return completed.filter((task) => task.rarity === 'legendary').length;
+  if (definition.kind === 'high-completion-tasks') return completed.filter((task) => Number(task.completionPercent) >= 200).length;
+  if (definition.kind === 'on-time-tasks') return completed.filter((task) => task.dueAt && task.completedAt && new Date(task.completedAt).getTime() <= new Date(task.dueAt).getTime()).length;
   if (definition.kind === 'redemptions') return (sourceEconomy.ledger || []).filter((entry) => entry.type === 'reward_redemption').length;
   if (definition.kind === 'daily-claims') return sourceDailyClaims.length;
+  if (definition.kind === 'level') return RewardRules.levelInfo(economyTotals(sourceEconomy).xp).level;
+  if (definition.kind === 'unique-rewards') return new Set((sourceEconomy.ledger || []).filter((entry) => entry.type === 'reward_redemption' && entry.rewardId).map((entry) => entry.rewardId)).size;
+  if (definition.kind === 'unique-tags') return new Set(completed.flatMap((task) => (Array.isArray(task.tags) ? task.tags : []).map((tag) => String(tag).trim().toLocaleLowerCase('zh-CN')).filter(Boolean))).size;
+  if (definition.kind === 'multi-task-days') {
+    const tasksPerDay = new Map();
+    for (const task of completed) {
+      if (!task.completedAt || Number.isNaN(new Date(task.completedAt).getTime())) continue;
+      const day = localDateKey(new Date(task.completedAt));
+      tasksPerDay.set(day, (tasksPerDay.get(day) || 0) + 1);
+    }
+    return [...tasksPerDay.values()].filter((count) => count >= 2).length;
+  }
   return 0;
 }
 
@@ -227,14 +461,14 @@ function reconcileAchievementUnlocks(existingUnlocks, sourceTasks, sourceEconomy
   return { unlocks, newlyUnlocked };
 }
 
-function persistTasks(nextTasks, nextEconomy = economy, nextCalendarMoods = calendarMoods, nextRewards = rewards, nextDailyRewardClaims = dailyRewardClaims, nextAchievementUnlocks = achievementUnlocks, nextCustomAchievements = customAchievements, nextSoundEnabled = soundEnabled) {
+function persistTasks(nextTasks, nextEconomy = economy, nextCalendarMoods = calendarMoods, nextRewards = rewards, nextDailyRewardClaims = dailyRewardClaims, nextAchievementUnlocks = achievementUnlocks, nextCustomAchievements = customAchievements, nextSoundEnabled = soundEnabled, nextTaskTemplates = taskTemplates) {
   if (storageLoadFailed) {
     showToast('本地数据读取异常，已暂停写入，避免覆盖原有内容。');
     return false;
   }
   try {
     const achievementResult = reconcileAchievementUnlocks(nextAchievementUnlocks, nextTasks, nextEconomy, nextCustomAchievements, nextDailyRewardClaims);
-    const nextState = { version: 8, tasks: nextTasks, economy: nextEconomy, calendarMoods: nextCalendarMoods, rewards: nextRewards, dailyRewardClaims: nextDailyRewardClaims, customAchievements: nextCustomAchievements, achievementUnlocks: achievementResult.unlocks, soundEnabled: nextSoundEnabled };
+    const nextState = { version: 9, tasks: nextTasks, taskTemplates: nextTaskTemplates, economy: nextEconomy, calendarMoods: nextCalendarMoods, rewards: nextRewards, dailyRewardClaims: nextDailyRewardClaims, customAchievements: nextCustomAchievements, achievementUnlocks: achievementResult.unlocks, soundEnabled: nextSoundEnabled };
     if (LocalDataStore.active) {
       const result = LocalDataStore.write(nextState);
       if (!result.saved) {
@@ -253,7 +487,8 @@ function persistTasks(nextTasks, nextEconomy = economy, nextCalendarMoods = cale
     customAchievements = nextCustomAchievements;
     achievementUnlocks = achievementResult.unlocks;
     soundEnabled = nextSoundEnabled;
-    state = { tasks, economy, calendarMoods, rewards, dailyRewardClaims, customAchievements, achievementUnlocks, soundEnabled };
+    taskTemplates = nextTaskTemplates;
+    state = { tasks, taskTemplates, economy, calendarMoods, rewards, dailyRewardClaims, customAchievements, achievementUnlocks, soundEnabled };
     if (achievementResult.newlyUnlocked.length) {
       const names = achievementResult.newlyUnlocked.map((item) => item.title).join('、');
       window.setTimeout(() => showToast(`解锁新成就：${names}`), 80);
@@ -325,7 +560,13 @@ function updateOverviewProgress() {
 function renderGrowthPage() {
   const total = economyTotals();
   const level = RewardRules.levelInfo(total.xp);
-  const history = [...(economy.ledger || [])].reverse().slice(0, 20);
+  const history = [...(economy.ledger || [])].reverse().filter((entry) => {
+    if (ledgerFilters.category && entry.type !== ledgerFilters.category) return false;
+    const date = entry.createdAt && !Number.isNaN(new Date(entry.createdAt).getTime()) ? localDateKey(new Date(entry.createdAt)) : '';
+    if (ledgerFilters.dateFrom && (!date || date < ledgerFilters.dateFrom)) return false;
+    if (ledgerFilters.dateTo && (!date || date > ledgerFilters.dateTo)) return false;
+    return true;
+  });
   page.innerHTML = `
     <div class="growth-page-heading"><div><p class="eyebrow">角色档案 · 成长记录</p><h1>角色成长</h1><p class="welcome-copy">XP 累积成长，金币记录可用余额。</p></div></div>
     <section class="growth-hero">
@@ -333,9 +574,28 @@ function renderGrowthPage() {
       <div class="growth-progress-info"><div class="growth-progress-heading"><strong>等级 ${level.level}</strong><span>${total.xp} XP 累计经验</span></div><div class="growth-track" role="progressbar" aria-label="当前等级经验进度" aria-valuemin="0" aria-valuemax="${level.rangeXp}" aria-valuenow="${level.progressXp}"><span style="width:${level.percent}%"></span></div><p>距离下一级还需 ${level.rangeXp - level.progressXp} XP（${level.progressXp} / ${level.rangeXp}）</p></div>
       <div class="growth-gold"><span class="gold-emblem" aria-hidden="true">币</span><div><span>金币余额</span><strong>${new Intl.NumberFormat('zh-CN').format(total.gold)}</strong></div></div>
     </section>
-    <section class="history-section"><div class="section-heading"><div><p class="eyebrow">奖励流水</p><h2>最近的成长与金币变动</h2></div></div>
-      ${history.length ? `<div class="ledger-list">${history.map((entry) => `<article class="ledger-row"><span class="ledger-mark" aria-hidden="true">${entry.type === 'reward_redemption' ? '◇' : '✦'}</span><div class="ledger-description"><strong>${escapeHtml(entry.title || '任务奖励')}</strong><span>${entry.type === 'reward_redemption' ? '商店兑换 · ' : ''}${escapeHtml(formatDate(entry.createdAt, { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }))}</span></div>${Number(entry.xpDelta) ? `<span class="ledger-xp">+${Number(entry.xpDelta)} XP</span>` : ''}<span class="ledger-gold">${Number(entry.goldDelta) < 0 ? '−' : '+'}${Math.abs(Number(entry.goldDelta) || 0)} 金币</span></article>`).join('')}</div>` : '<div class="task-empty growth-empty"><span class="empty-icon" aria-hidden="true">✳</span><h2>成长记录从第一条任务开始</h2><p>完成任务或兑换商店奖励后，这里会显示对应流水。</p><a class="pixel-button" href="#tasks">查看任务列表</a></div>'}
+    <section class="history-section"><div class="section-heading"><div><p class="eyebrow">奖励流水</p><h2>成长与金币变动</h2></div><span>${history.length} 条记录</span></div>
+      <form class="history-filters" id="ledger-filters" aria-label="筛选奖励流水">
+        <label class="filter-field">流水分类<select name="category"><option value="">全部分类</option><option value="task_reward" ${ledgerFilters.category === 'task_reward' ? 'selected' : ''}>任务奖励</option><option value="reward_redemption" ${ledgerFilters.category === 'reward_redemption' ? 'selected' : ''}>商店兑换</option></select></label>
+        <label class="filter-field">开始日期<input name="dateFrom" type="date" value="${escapeHtml(ledgerFilters.dateFrom)}" /></label>
+        <label class="filter-field">结束日期<input name="dateTo" type="date" value="${escapeHtml(ledgerFilters.dateTo)}" /></label>
+        <button class="pixel-button button-muted filter-reset" type="reset">清除筛选</button>
+      </form>
+      ${history.length ? `<div class="ledger-list">${history.map((entry) => `<article class="ledger-row"><span class="ledger-mark" aria-hidden="true">${entry.type === 'reward_redemption' ? '◇' : '✦'}</span><div class="ledger-description"><strong>${escapeHtml(entry.title || '任务奖励')}</strong><span>${entry.type === 'reward_redemption' ? '商店兑换 · ' : '任务奖励 · '}${escapeHtml(formatDate(entry.createdAt, { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }))}</span></div>${Number(entry.xpDelta) ? `<span class="ledger-xp">+${Number(entry.xpDelta)} XP</span>` : ''}<span class="ledger-gold">${Number(entry.goldDelta) < 0 ? '−' : '+'}${Math.abs(Number(entry.goldDelta) || 0)} 金币</span></article>`).join('')}</div>` : (economy.ledger || []).length ? '<div class="calendar-day-empty"><strong>没有符合条件的流水</strong><span>可以调整分类或日期范围，再试一次。</span></div>' : '<div class="task-empty growth-empty"><span class="empty-icon" aria-hidden="true">✳</span><h2>成长记录从第一条任务开始</h2><p>完成任务或兑换商店奖励后，这里会显示对应流水。</p><a class="pixel-button" href="#tasks">查看任务列表</a></div>'}
     </section>`;
+}
+
+function updateLedgerFilters(event) {
+  if (event?.type === 'reset') {
+    event.preventDefault();
+    Object.assign(ledgerFilters, { category: '', dateFrom: '', dateTo: '' });
+  } else {
+    const fields = new FormData(document.querySelector('#ledger-filters'));
+    Object.keys(ledgerFilters).forEach((key) => { ledgerFilters[key] = String(fields.get(key) || ''); });
+  }
+  renderGrowthPage();
+  if (event?.target?.name) document.querySelector(`#ledger-filters [name="${event.target.name}"]`)?.focus();
+  else document.querySelector('#ledger-filters [type="reset"]')?.focus();
 }
 
 function renderRewardsPage() {
@@ -351,7 +611,11 @@ function renderRewardsPage() {
 }
 
 function getTodayCompletedTasks(dateKey = localDateKey(new Date())) {
-  return tasks.filter((task) => task.dailyRewardDate === dateKey && task.status === 'completed' && task.completedAt && localDateKey(new Date(task.completedAt)) === dateKey);
+  const dailyRewardTags = new Set(['日常', '每日']);
+  return tasks.filter((task) => task.status === 'completed'
+    && task.completedAt
+    && localDateKey(new Date(task.completedAt)) === dateKey
+    && (Array.isArray(task.tags) ? task.tags : []).some((tag) => dailyRewardTags.has(String(tag).trim())));
 }
 
 function getDailyCompletionPercent(dateKey = localDateKey(new Date())) {
@@ -379,16 +643,16 @@ function renderDailyRewardPage() {
     <div class="task-page-heading"><div><p class="eyebrow">每日仪式 · 本地日历日</p><h1>每日奖励</h1><p class="welcome-copy">完成当天目标后领取奖励。每日奖励独立于金币商店，不扣金币。</p></div></div>
     <section class="daily-reward-card" aria-labelledby="daily-status-heading"><div class="daily-reward-heading"><div><p class="eyebrow">${escapeHtml(formatDate(today, { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' }))}</p><h2 id="daily-status-heading">${status}</h2></div><span class="daily-reward-icon" aria-hidden="true">☼</span></div>
       <div class="daily-reward-prize"><span>今日奖励</span><strong>${escapeHtml(reward.name)} ${reward.amount} ${escapeHtml(reward.unit)}</strong></div>
-      <div class="daily-progress-label"><span>今日候选任务完成度</span><strong>${completedPercent}% / ${required}%</strong></div><div class="daily-progress-track" role="progressbar" aria-label="每日奖励完成度进度" aria-valuemin="0" aria-valuemax="${required}" aria-valuenow="${Math.min(completedPercent, required)}"><span style="width:${progress}%"></span></div>
+      <div class="daily-progress-label"><span>今日日常任务完成度</span><strong>${completedPercent}% / ${required}%</strong></div><div class="daily-progress-track" role="progressbar" aria-label="每日奖励完成度进度" aria-valuemin="0" aria-valuemax="${required}" aria-valuenow="${Math.min(completedPercent, required)}"><span style="width:${Math.min(progress, 100)}%"></span></div>
       ${claim ? `<p class="daily-reward-message" role="status">已于 ${escapeHtml(formatDate(claim.claimedAt, { hour: '2-digit', minute: '2-digit' }))} 领取：${escapeHtml(claim.rewardName)} ${claim.amount} ${escapeHtml(claim.unit)}。</p>` : ready ? '<p class="daily-reward-message">完成度已达标，可以领取今日奖励。</p>' : `<p class="daily-reward-message">还差 ${required - completedPercent}% 完成度。任务完成度可超过 200%；超额部分计入每日进度，但 XP/金币奖励最高按 200% 加权。</p>`}
       <div class="daily-reward-actions"><button class="pixel-button daily-claim-button" type="button" data-action="claim-daily-reward" ${claim || !ready ? 'disabled' : ''}>${claim ? '今日已领取' : ready ? '领取今日奖励' : '尚未达成'}</button>${!claim && !ready ? '<a class="pixel-button button-muted" href="#tasks">去任务列表</a>' : ''}</div>
     </section>
     <section class="daily-candidate-section"><div class="section-heading"><div><p class="eyebrow">常驻候选任务</p><h2>选择今天要做的任务</h2></div><span>所选任务会加入普通任务列表</span></div><div class="daily-candidate-grid">${DailyRewardRules.candidateTasks.map((preset) => {
       const currentTask = tasks.find((task) => task.dailyRewardDate === today && task.dailyRewardTemplateId === preset.id);
       return `<article class="daily-candidate-card"><div><h3>${escapeHtml(preset.title)}</h3><p>${escapeHtml(preset.description)}</p></div>${currentTask ? `<div class="daily-candidate-current"><span class="status-pill status-${escapeHtml(currentTask.status)}">${escapeHtml(statusLabels[currentTask.status] || '待办')}</span><span>${currentTask.status === 'completed' ? `完成度 ${currentTask.completionPercent ?? 0}%` : '已加入今日任务'}</span><button class="pixel-button button-muted" type="button" data-action="open-detail" data-id="${escapeHtml(currentTask.id)}">查看任务</button></div>` : `<button class="pixel-button button-muted" type="button" data-action="add-daily-template" data-id="${escapeHtml(preset.id)}">加入今日任务</button>`}</article>`;
-    }).join('')}</div><p class="field-hint">每日进度只累计今天从候选池加入且今天完成的任务。已选择的任务仍可在任务列表中正常查看、编辑和领取任务奖励。</p></section>
+    }).join('')}</div><p class="field-hint">当天完成且带有“日常”或“每日”标签的任务都会计入进度；从这里加入的候选任务会自动带上这两个标签。任务仍可在列表中照常编辑和领取 XP、金币。</p></section>
     <section class="history-section daily-history"><div class="section-heading"><div><p class="eyebrow">领取记录</p><h2>每日奖励历史</h2></div><span>${dailyRewardClaims.length} 次</span></div>${history.length ? `<div class="redemption-list">${history.slice(0, 30).map((entry) => `<article class="redemption-row"><div><strong>${escapeHtml(entry.rewardName)} ${entry.amount} ${escapeHtml(entry.unit)}</strong><span>${escapeHtml(formatDate(entry.date, { year: 'numeric', month: 'long', day: 'numeric' }))} · ${escapeHtml(formatDate(entry.claimedAt, { hour: '2-digit', minute: '2-digit' }))}</span></div><b>已领取</b></article>`).join('')}</div>` : '<div class="calendar-day-empty"><strong>还没有领取记录</strong><span>达成当日条件并领取后，记录会保存在这里。</span></div>'}</section>
-    <footer class="page-footer"><span>每日条件：候选任务完成度累计 ${required}%</span><span>领取不扣金币、不发 XP</span></footer>`;
+    <footer class="page-footer"><span>每日条件：“日常”或“每日”标签任务完成度累计 ${required}%</span><span>领取不扣金币、不发 XP</span></footer>`;
 }
 
 function claimDailyReward() {
@@ -445,6 +709,11 @@ function updateAchievementTagField() {
   tagInput.required = isTagged;
 }
 
+function updateAchievementIconPreview() {
+  const icon = achievementForm.elements.namedItem('icon').value;
+  document.querySelector('#achievement-icon-preview').innerHTML = PixelUI.icon(icon);
+}
+
 function openNewAchievement() {
   achievementForm.reset();
   const categoryList = document.querySelector('#achievement-category-options');
@@ -453,6 +722,7 @@ function openNewAchievement() {
   kindSelect.innerHTML = AchievementRules.conditionKinds.map((condition) => `<option value="${escapeHtml(condition.id)}">${escapeHtml(condition.label)}</option>`).join('');
   document.querySelector('#achievement-form-error').hidden = true;
   updateAchievementTagField();
+  updateAchievementIconPreview();
   achievementDialog.showModal();
   playUiSound('open');
   achievementForm.elements.namedItem('title').focus();
@@ -661,6 +931,7 @@ function formatDateTimeLocalInput(value) {
 }
 
 function renderRoute() {
+  if (activeGoalsTaskId && !goalsWindowPinned) closeTaskGoalsWindow();
   const key = location.hash.slice(1) || 'overview';
   const sectionKey = sections[key] ? key : 'overview';
   const { title, icon } = sections[sectionKey];
@@ -685,6 +956,19 @@ function renderRoute() {
   else if (sectionKey === 'daily') renderDailyRewardPage();
   else if (sectionKey === 'achievements') renderAchievementsPage();
   else page.innerHTML = `<div class="placeholder-page"><span class="placeholder-mark" aria-hidden="true">${icon}</span><p class="eyebrow">冒险地图 · ${title}</p><h1>${title}</h1><p>这个区域已为后续阶段准备好。功能会按计划逐步加入。</p><a class="placeholder-link" href="#overview">返回总览</a></div>`;
+}
+
+function scheduleRecurringTaskRefresh() {
+  if (recurrenceRefreshTimer) window.clearTimeout(recurrenceRefreshTimer);
+  const now = new Date();
+  const nextLocalDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  recurrenceRefreshTimer = window.setTimeout(() => {
+    const nextTasks = generateDueRecurringTasks(tasks);
+    const addedCount = nextTasks.length - tasks.length;
+    if (addedCount > 0 && persistTasks(nextTasks)) showToast(`已生成 ${addedCount} 条新的周期任务，旧记录已保留。`);
+    refreshTaskView();
+    scheduleRecurringTaskRefresh();
+  }, Math.max(1000, nextLocalDay.getTime() - now.getTime() + 100));
 }
 
 function refreshTaskView() {
@@ -725,7 +1009,7 @@ function renderTaskPage() {
   page.innerHTML = `
     <div class="task-page-heading">
       <div><p class="eyebrow">任务档案 · 现实主线</p><h1>任务列表</h1><p class="welcome-copy">把要做的事整理好，一次推进一小步。</p></div>
-      <button class="pixel-button" type="button" data-action="new-task"><span aria-hidden="true">＋</span> 新建任务</button>
+      <div class="task-heading-actions"><button class="pixel-button button-muted" type="button" data-action="open-task-templates">任务模板${taskTemplates.length ? ` · ${taskTemplates.length}` : ''}</button><button class="pixel-button" type="button" data-action="new-task"><span aria-hidden="true">＋</span> 新建任务</button></div>
     </div>
     <div class="task-summary"><span>任务记录 <strong>${tasks.length}</strong></span><span>已完成 <strong>${completed}</strong></span><span>当前显示 <strong>${visibleTasks.length}</strong></span></div>
     <form class="task-filters" id="task-filters" aria-label="筛选和排序任务">
@@ -791,16 +1075,32 @@ function renderTaskItems(sorted = getVisibleTaskItems()) {
     </article>`).join('');
 }
 
+function getBoardVisibleTasks() {
+  const today = localDateKey(new Date());
+  return tasks.filter((task) => (!boardFilters.category || task.category === boardFilters.category)
+    && (!boardFilters.branch || (task.category === 'main' && task.branch === boardFilters.branch))
+    && (boardFilters.date !== 'today' || task.plannedDate === today || (task.dueAt && localDateKey(new Date(task.dueAt)) === today))
+    && (boardFilters.status === 'all' || (boardFilters.status === 'completed' ? task.status === 'completed' : task.status !== 'completed')));
+}
+
 function renderBoardPage() {
-  const counts = Object.fromEntries(Object.keys(statusLabels).map((status) => [status, tasks.filter((task) => task.status === status).length]));
+  const visibleTasks = getBoardVisibleTasks();
+  const counts = Object.fromEntries(Object.keys(statusLabels).map((status) => [status, visibleTasks.filter((task) => task.status === status).length]));
   page.innerHTML = `
     <div class="task-page-heading board-page-heading">
       <div><p class="eyebrow">进度视图 · 状态追踪</p><h1>任务看板</h1><p class="welcome-copy">按当前进度整理任务；状态变化会同步到任务列表。</p></div>
       <button class="pixel-button" type="button" data-action="new-task"><span aria-hidden="true">＋</span> 新建任务</button>
     </div>
-    <div class="task-summary"><span>全部任务 <strong>${tasks.length}</strong></span><span>已完成 <strong>${counts.completed}</strong></span></div>
-    ${tasks.length ? `<div class="kanban-scroll" role="region" aria-label="任务看板，可左右滚动" tabindex="0"><div class="kanban-board">${Object.entries(statusLabels).map(([status, label]) => {
-      const columnTasks = tasks.filter((task) => task.status === status).sort((a, b) => (a.plannedDate || '9999-12-31').localeCompare(b.plannedDate || '9999-12-31') || (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+    <form class="board-filters" id="board-filters" aria-label="筛选看板任务">
+      <label class="filter-field">日期<select name="date"><option value="today" ${boardFilters.date === 'today' ? 'selected' : ''}>当天任务</option><option value="all" ${boardFilters.date === 'all' ? 'selected' : ''}>全部日期</option></select></label>
+      <label class="filter-field">完成状态<select name="status"><option value="open" ${boardFilters.status === 'open' ? 'selected' : ''}>未完成</option><option value="all" ${boardFilters.status === 'all' ? 'selected' : ''}>全部状态</option><option value="completed" ${boardFilters.status === 'completed' ? 'selected' : ''}>已完成</option></select></label>
+      <label class="filter-field">任务类别<select name="category"><option value="">全部类别</option><option value="main" ${boardFilters.category === 'main' ? 'selected' : ''}>主线</option><option value="side" ${boardFilters.category === 'side' ? 'selected' : ''}>支线</option></select></label>
+      <label class="filter-field">主线分支<select name="branch" ${boardFilters.category === 'side' ? 'disabled' : ''}><option value="">全部分支</option>${Object.entries(branchLabels).map(([value, label]) => `<option value="${value}" ${boardFilters.branch === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+      <button class="pixel-button button-muted filter-reset" type="reset">恢复默认筛选</button>
+    </form>
+    <div class="task-summary"><span>符合筛选 <strong>${visibleTasks.length}</strong> / ${tasks.length}</span><span>已完成 <strong>${counts.completed}</strong></span></div>
+    ${tasks.length ? (visibleTasks.length ? `<div class="kanban-scroll" role="region" aria-label="任务看板，可左右滚动" tabindex="0"><div class="kanban-board">${Object.entries(statusLabels).map(([status, label]) => {
+      const columnTasks = visibleTasks.filter((task) => task.status === status).sort((a, b) => (a.plannedDate || '9999-12-31').localeCompare(b.plannedDate || '9999-12-31') || (b.updatedAt || '').localeCompare(a.updatedAt || ''));
       return `<section class="kanban-column kanban-${status}" aria-labelledby="board-column-${status}">
         <header class="kanban-column-heading"><h2 id="board-column-${status}">${escapeHtml(label)}</h2><span>${columnTasks.length}</span></header>
         <div class="kanban-card-list">${columnTasks.length ? columnTasks.map((task) => `
@@ -810,8 +1110,22 @@ function renderBoardPage() {
             <label class="kanban-status-field">更改状态<select data-board-status data-id="${escapeHtml(task.id)}" aria-label="更改任务状态：${escapeHtml(task.title)}">${Object.entries(statusLabels).map(([value, statusLabel]) => `<option value="${value}" ${value === task.status ? 'selected' : ''}>${escapeHtml(statusLabel)}</option>`).join('')}</select></label>
           </article>`).join('') : '<div class="kanban-column-empty">此列暂无任务</div>'}</div>
       </section>`;
-    }).join('')}</div></div>` : `<div class="task-empty board-empty"><span class="empty-icon" aria-hidden="true">▥</span><h2>看板还是空的</h2><p>创建第一条任务后，它会出现在待办列中。</p><button class="pixel-button" type="button" data-action="new-task">创建第一条任务</button></div>`}
-    <footer class="page-footer"><span>状态与任务列表保持同步</span><span>完成任务时仍需填写完成度评分</span></footer>`;
+    }).join('')}</div></div>` : '<div class="task-empty board-empty"><span class="empty-icon" aria-hidden="true">⌕</span><h2>没有符合条件的任务</h2><p>调整日期、完成状态、类别或主线分支筛选。</p><button class="pixel-button button-muted" type="reset" form="board-filters">恢复默认筛选</button></div>') : `<div class="task-empty board-empty"><span class="empty-icon" aria-hidden="true">▥</span><h2>看板还是空的</h2><p>创建第一条任务后，它会出现在待办列中。</p><button class="pixel-button" type="button" data-action="new-task">创建第一条任务</button></div>`}
+    <footer class="page-footer"><span>默认显示当天所有状态的任务，可通过筛选查看其他日期或状态</span><span>完成任务时仍需填写完成度评分</span></footer>`;
+}
+
+function updateBoardFilters(event) {
+  if (event?.type === 'reset') {
+    event.preventDefault();
+    Object.assign(boardFilters, { category: '', branch: '', date: 'today', status: 'all' });
+  } else {
+    const fields = new FormData(document.querySelector('#board-filters'));
+    Object.keys(boardFilters).forEach((key) => { boardFilters[key] = String(fields.get(key) || ''); });
+    if (boardFilters.category === 'side') boardFilters.branch = '';
+  }
+  renderBoardPage();
+  if (event?.target?.name) document.querySelector(`#board-filters [name="${event.target.name}"]`)?.focus();
+  else document.querySelector('#board-filters [type="reset"]')?.focus();
 }
 
 function renderCalendarPage() {
@@ -951,8 +1265,13 @@ function updateTaskFilters(event) {
 }
 
 function openNewTask(parentId = '', returnDetailId = null) {
+  configureTaskFormMode('task');
+  closeTaskGoalsWindow();
+  pendingTemplateChildren = [];
+  pendingTaskGoals = [];
   taskForm.reset();
   taskForm.elements.namedItem('plannedDate').value = localDateKey(new Date());
+  taskForm.elements.namedItem('dueAt').value = defaultEndOfDayDateTime();
   taskForm.elements.namedItem('id').value = '';
   taskForm.elements.namedItem('dailyRewardDate').value = '';
   taskForm.elements.namedItem('dailyRewardTemplateId').value = '';
@@ -963,6 +1282,7 @@ function openNewTask(parentId = '', returnDetailId = null) {
   suggestionTouched = { xp: false, gold: false };
   document.querySelector('#task-dialog-title').textContent = '新建任务';
   document.querySelector('#task-form-error').hidden = true;
+  renderTaskGoalEditor();
   returnToDetailAfterTaskDialog = returnDetailId;
   updateParentTaskField(parentId);
   updateBranchField();
@@ -971,6 +1291,298 @@ function openNewTask(parentId = '', returnDetailId = null) {
   taskDialog.showModal();
   playUiSound('open');
   taskForm.elements.namedItem('title').focus();
+}
+
+function collectTaskGoalEditor() {
+  const rows = [...document.querySelectorAll('#task-goal-list [data-task-goal-row]')];
+  if (!rows.length) return normaliseTaskGoals(pendingTaskGoals);
+  return rows.map((row) => {
+    const goal = pendingTaskGoals.find((item) => item.id === row.dataset.goalId);
+    return { id: row.dataset.goalId, text: row.querySelector('[data-task-goal-text]')?.value.trim() || '', isComplete: goal?.isComplete || false, lastCompletedAt: goal?.lastCompletedAt || null };
+  }).slice(0, 50);
+}
+
+function renderTaskGoalEditor() {
+  const list = document.querySelector('#task-goal-list');
+  if (!list) return;
+  list.innerHTML = pendingTaskGoals.length ? pendingTaskGoals.map((goal, index) => `<div class="task-goal-editor-row" data-task-goal-row data-goal-id="${escapeHtml(goal.id)}"><label class="field"><span>目标 ${index + 1}</span><input data-task-goal-text value="${escapeHtml(goal.text)}" maxlength="200" placeholder="例如：整理实验数据" /></label><div class="task-goal-editor-actions">${goal.lastCompletedAt ? `<span class="task-goal-done-hint">完成记录 · ${escapeHtml(formatDate(goal.lastCompletedAt, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }))}</span>` : ''}<button class="pixel-button button-danger" type="button" data-action="remove-task-goal" data-id="${escapeHtml(goal.id)}">移除</button></div></div>`).join('') : '<p class="task-goals-editor-empty">尚未添加目标。保存任务后，可在目标悬浮窗中逐项勾选。</p>';
+}
+
+function addTaskGoal() {
+  pendingTaskGoals = collectTaskGoalEditor();
+  pendingTaskGoals.push({ id: createUniqueId(), text: '', isComplete: false, lastCompletedAt: null });
+  renderTaskGoalEditor();
+  document.querySelector('#task-goal-list [data-task-goal-row]:last-child [data-task-goal-text]')?.focus();
+}
+
+function removeTaskGoal(id) {
+  const goal = collectTaskGoalEditor().find((item) => item.id === id);
+  if (!goal) return;
+  if (goal.lastCompletedAt && !window.confirm('移除此目标？已有的进展记录会保留。')) return;
+  pendingTaskGoals = collectTaskGoalEditor().filter((item) => item.id !== id);
+  renderTaskGoalEditor();
+}
+
+function configureTaskFormMode(mode, templateId = '') {
+  taskFormMode = mode;
+  editingTemplateId = templateId;
+  const isTemplate = mode === 'template';
+  document.querySelector('#parent-task-field').hidden = isTemplate;
+  taskForm.elements.namedItem('plannedDate').closest('.field').hidden = isTemplate;
+  document.querySelector('#due-at-label').textContent = isTemplate ? '默认截止时间' : '截止时间';
+  updateTemplateChildrenField();
+  document.querySelector('#task-dialog-title').textContent = isTemplate ? (templateId ? '编辑任务模板' : '创建任务模板') : '新建任务';
+  taskForm.querySelector('[type="submit"]').textContent = isTemplate ? '保存模板' : '保存任务';
+}
+
+function openNewTemplate() {
+  openNewTask();
+  configureTaskFormMode('template');
+}
+
+function templateFromFields(formData, id = '', createdAt = '', isBossOverride = null, children = []) {
+  const isBoss = !formData.get('parentId') && (isBossOverride ?? taskForm.elements.namedItem('isBoss').checked);
+  const dueValue = String(formData.get('dueAt') || '');
+  return {
+    id: id || (globalThis.crypto?.randomUUID?.() || `template-${Date.now()}-${Math.random().toString(16).slice(2)}`),
+    title: String(formData.get('title') || '').trim(),
+    description: String(formData.get('description') || '').trim(),
+    category: formData.get('category') || 'side',
+    branch: formData.get('category') === 'main' ? formData.get('branch') : '',
+    recurrence: formData.get('recurrence') || 'once',
+    priority: formData.get('priority') || 'normal',
+    rarity: formData.get('rarity') || 'common',
+    dueTime: /^\d{4}-\d{2}-\d{2}T(([01]\d|2[0-3]):[0-5]\d)$/.test(dueValue) ? dueValue.slice(-5) : '23:59',
+    isBoss,
+    tags: String(formData.get('tags') || '').split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
+    goals: normaliseTaskGoals(pendingTaskGoals).map((goal) => goal.text),
+    xpReward: Math.max(0, Math.floor(Number(formData.get('xpReward')) || 0)),
+    goldReward: Math.max(0, Math.floor(Number(formData.get('goldReward')) || 0)),
+    children: isBoss ? children : [],
+    createdAt: createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function fillTaskFormFromTemplate(template) {
+  const fields = taskForm.elements;
+  pendingTemplateChildren = Array.isArray(template.children) ? template.children : [];
+  fields.namedItem('id').value = '';
+  fields.namedItem('dailyRewardDate').value = '';
+  fields.namedItem('dailyRewardTemplateId').value = '';
+  fields.namedItem('parentId').value = '';
+  fields.namedItem('title').value = template.title;
+  fields.namedItem('description').value = template.description || '';
+  fields.namedItem('category').value = template.category || 'side';
+  fields.namedItem('branch').value = template.branch || '';
+  fields.namedItem('status').value = 'todo';
+  fields.namedItem('recurrence').value = template.recurrence || 'once';
+  fields.namedItem('completionPercent').value = '';
+  fields.namedItem('priority').value = template.priority || 'normal';
+  fields.namedItem('rarity').value = template.rarity || 'common';
+  fields.namedItem('isBoss').checked = Boolean(template.isBoss);
+  fields.namedItem('plannedDate').value = localDateKey(new Date());
+  fields.namedItem('dueAt').value = todayDateTimeLocal(template.dueTime);
+  fields.namedItem('tags').value = (template.tags || []).join(', ');
+  fields.namedItem('xpReward').value = template.xpReward ?? 0;
+  fields.namedItem('goldReward').value = template.goldReward ?? 0;
+  pendingTaskGoals = normaliseTemplateGoals(template.goals).map((text) => ({ id: createUniqueId(), text, isComplete: false, lastCompletedAt: null }));
+  renderTaskGoalEditor();
+  suggestionTouched = { xp: true, gold: true };
+  updateBranchField();
+  updateParentTaskField('');
+  updateCompletionField();
+  updateTemplateChildrenField();
+  document.querySelector('#suggestion-note').textContent = '已载入模板奖励设置；仍可编辑。计划日期默认今天，截止时间默认今天 23:59。';
+}
+
+function updateTemplateChildrenField() {
+  const section = document.querySelector('#template-children-section');
+  if (!section) return;
+  const isVisible = taskFormMode === 'template' && taskForm.elements.namedItem('isBoss').checked;
+  section.hidden = !isVisible;
+  renderTemplateChildEditor();
+}
+
+function renderTemplateChildEditor() {
+  const list = document.querySelector('#template-child-list');
+  if (!list) return;
+  list.innerHTML = pendingTemplateChildren.length ? pendingTemplateChildren.map((child, index) => `<article class="template-child-card" data-template-child-id="${escapeHtml(child.id)}">
+    <div class="template-child-heading"><strong>子任务 ${index + 1}</strong><button class="pixel-button button-danger" type="button" data-action="template-child-delete" data-id="${escapeHtml(child.id)}">移除</button></div>
+    <div class="form-grid">
+      <label class="field field-wide">名称<input data-template-child-field="title" value="${escapeHtml(child.title || '')}" maxlength="120" /></label>
+      <label class="field field-wide">描述<textarea data-template-child-field="description" rows="2">${escapeHtml(child.description || '')}</textarea></label>
+      <label class="field">类别<select data-template-child-field="category"><option value="side" ${child.category !== 'main' ? 'selected' : ''}>支线</option><option value="main" ${child.category === 'main' ? 'selected' : ''}>主线</option></select></label>
+      <label class="field">主线分支<select data-template-child-field="branch"><option value="">请选择</option><option value="research" ${child.branch === 'research' ? 'selected' : ''}>科研</option><option value="study" ${child.branch === 'study' ? 'selected' : ''}>学业</option><option value="career" ${child.branch === 'career' ? 'selected' : ''}>找工</option></select></label>
+      <label class="field">重复周期<input value="跟随 Boss 周期" readonly /></label>
+      <label class="field">优先级<select data-template-child-field="priority"><option value="normal" ${child.priority === 'normal' ? 'selected' : ''}>普通</option><option value="high" ${child.priority === 'high' ? 'selected' : ''}>高</option><option value="low" ${child.priority === 'low' ? 'selected' : ''}>低</option></select></label>
+      <label class="field">稀有度<select data-template-child-field="rarity"><option value="common" ${child.rarity === 'common' ? 'selected' : ''}>普通</option><option value="rare" ${child.rarity === 'rare' ? 'selected' : ''}>稀有</option><option value="epic" ${child.rarity === 'epic' ? 'selected' : ''}>史诗</option><option value="legendary" ${child.rarity === 'legendary' ? 'selected' : ''}>传说</option></select></label>
+      <label class="field">默认截止时间<input data-template-child-field="dueTime" type="time" value="${escapeHtml(child.dueTime || '23:59')}" /></label>
+      <label class="field field-wide">标签<input data-template-child-field="tags" value="${escapeHtml((child.tags || []).join(', '))}" placeholder="逗号分隔" /></label>
+      <label class="field field-wide">目标（每行一项）<textarea data-template-child-field="goals" rows="2" placeholder="例如：整理数据&#10;完成图表">${escapeHtml((child.goals || []).join('\n'))}</textarea></label>
+      <label class="field">XP<input data-template-child-field="xpReward" type="number" min="0" step="1" value="${Number(child.xpReward) || 0}" /></label>
+      <label class="field">金币<input data-template-child-field="goldReward" type="number" min="0" step="1" value="${Number(child.goldReward) || 0}" /></label>
+    </div>
+  </article>`).join('') : '<div class="calendar-day-empty"><strong>还没有子任务</strong><span>添加后，套用此 Boss 模板时会一并创建。</span></div>';
+}
+
+function collectTemplateChildrenFromEditor() {
+  return [...document.querySelectorAll('#template-child-list [data-template-child-id]')].map((row) => {
+    const read = (name) => row.querySelector(`[data-template-child-field="${name}"]`)?.value || '';
+    const category = read('category') === 'main' ? 'main' : 'side';
+    return {
+      id: row.dataset.templateChildId,
+      title: read('title').trim(),
+      description: read('description').trim(),
+      category,
+      branch: category === 'main' && branchLabels[read('branch')] ? read('branch') : '',
+      recurrence: 'once',
+      priority: read('priority') || 'normal',
+      rarity: read('rarity') || 'common',
+      dueTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(read('dueTime')) ? read('dueTime') : '23:59',
+      goals: read('goals').split(/\r?\n/).map((goal) => goal.trim()).filter(Boolean).slice(0, 50),
+      isBoss: false,
+      tags: read('tags').split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
+      xpReward: Math.max(0, Math.floor(Number(read('xpReward')) || 0)),
+      goldReward: Math.max(0, Math.floor(Number(read('goldReward')) || 0)),
+    };
+  });
+}
+
+function addTemplateChild() {
+  if (taskFormMode !== 'template' || !taskForm.elements.namedItem('isBoss').checked) return;
+  pendingTemplateChildren = collectTemplateChildrenFromEditor();
+  const suggestion = RewardRules.suggestTaskRewards({ category: 'side', rarity: 'common', isBoss: false, recurrence: 'once' });
+  const childId = createUniqueId();
+  pendingTemplateChildren.push({ id: childId, title: '', description: '', category: 'side', branch: '', recurrence: 'once', priority: 'normal', rarity: 'common', dueTime: '23:59', isBoss: false, tags: [], xpReward: suggestion.xp, goldReward: suggestion.gold });
+  renderTemplateChildEditor();
+  [...document.querySelectorAll('#template-child-list [data-template-child-id]')].find((row) => row.dataset.templateChildId === childId)?.querySelector('[data-template-child-field="title"]')?.focus();
+}
+
+function removeTemplateChild(id) {
+  pendingTemplateChildren = collectTemplateChildrenFromEditor().filter((child) => child.id !== id);
+  renderTemplateChildEditor();
+}
+
+function useTaskTemplate(id) {
+  const template = taskTemplates.find((item) => item.id === id);
+  if (!template) return;
+  document.querySelector('#task-template-dialog').close();
+  openNewTask();
+  fillTaskFormFromTemplate(template);
+  taskForm.elements.namedItem('title').focus();
+}
+
+function openEditTemplate(id) {
+  const template = taskTemplates.find((item) => item.id === id);
+  if (!template) return;
+  document.querySelector('#task-template-dialog').close();
+  openNewTask();
+  configureTaskFormMode('template', id);
+  fillTaskFormFromTemplate(template);
+  taskForm.elements.namedItem('plannedDate').value = '';
+}
+
+function renderTaskTemplates() {
+  const dialog = document.querySelector('#task-template-dialog');
+  document.querySelector('#task-template-list').innerHTML = taskTemplates.length ? taskTemplates.map((item) => `<article class="task-template-row"><div><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(`${categoryLabels[item.category] || '支线'}${item.category === 'main' ? ` · ${branchLabels[item.branch] || ''}` : ''} · ${item.xpReward} XP · ${item.goldReward} 金币 · 截止 ${item.dueTime}${item.children.length ? ` · ${item.children.length} 项子任务` : ''}`)}</p>${item.description ? `<span>${escapeHtml(item.description)}</span>` : ''}</div><div class="task-template-actions"><button class="pixel-button" type="button" data-action="use-task-template" data-id="${escapeHtml(item.id)}">用此模板</button><button class="pixel-button button-muted" type="button" data-action="edit-task-template" data-id="${escapeHtml(item.id)}">编辑</button><button class="pixel-button button-danger" type="button" data-action="delete-task-template" data-id="${escapeHtml(item.id)}">删除</button></div></article>`).join('') : '<div class="calendar-day-empty"><strong>还没有任务模板</strong><span>创建模板，或从现有任务详情中保存为模板。</span></div>';
+  if (!dialog.open) dialog.showModal();
+}
+
+function deleteTaskTemplate(id) {
+  const template = taskTemplates.find((item) => item.id === id);
+  if (!template || !window.confirm(`删除模板“${template.title}”？已创建的任务不会受到影响。`)) return;
+  const nextTemplates = taskTemplates.filter((item) => item.id !== id);
+  if (!persistTasks(tasks, economy, calendarMoods, rewards, dailyRewardClaims, achievementUnlocks, customAchievements, soundEnabled, nextTemplates)) return;
+  renderTaskTemplates();
+  if (location.hash === '#tasks') renderTaskPage();
+  showToast(`模板“${template.title}”已删除。`);
+}
+
+function beginSaveTaskAsTemplate(id) {
+  const task = tasks.find((item) => item.id === id);
+  if (task?.isBoss) {
+    showBossChildrenChoice('template', id);
+    return;
+  }
+  saveTaskAsTemplate(id, false);
+}
+
+function saveTaskAsTemplate(id, includeChildren = false) {
+  const task = tasks.find((item) => item.id === id);
+  if (!task) return;
+  pendingTaskGoals = normaliseTaskGoals(task.goals);
+  const childTasks = includeChildren ? tasks.filter((item) => item.parentId === id) : [];
+  const children = childTasks.map(taskToTemplate);
+  const formData = new FormData();
+  Object.entries({ title: task.title, description: task.description, category: task.category, branch: task.branch, recurrence: task.recurrence, priority: task.priority, rarity: task.rarity, parentId: '', dueAt: formatDateTimeLocalInput(task.dueAt) || defaultEndOfDayDateTime(), tags: (task.tags || []).join(', '), xpReward: task.xpReward, goldReward: task.goldReward }).forEach(([key, value]) => formData.set(key, value ?? ''));
+  const nextTemplates = normaliseTaskTemplates([...taskTemplates, templateFromFields(formData, '', '', Boolean(task.isBoss), children)]);
+  if (!persistTasks(tasks, economy, calendarMoods, rewards, dailyRewardClaims, achievementUnlocks, customAchievements, soundEnabled, nextTemplates)) return;
+  renderTaskPage();
+  if (detailDialog.open && activeDetailId === id) renderDetail(id);
+  showToast(`已将“${task.title}”${children.length ? `及 ${children.length} 项子任务` : ''}保存为任务模板。`);
+}
+
+function taskToTemplate(task) {
+  return {
+    id: globalThis.crypto?.randomUUID?.() || `template-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    title: task.title,
+    description: task.description || '',
+    category: task.category || 'side',
+    branch: task.branch || '',
+    recurrence: task.recurrence || 'once',
+    priority: task.priority || 'normal',
+    rarity: task.rarity || 'common',
+    dueTime: formatDateTimeLocalInput(task.dueAt).slice(-5) || '23:59',
+    isBoss: Boolean(task.isBoss),
+    tags: Array.isArray(task.tags) ? [...task.tags] : [],
+    goals: normaliseTaskGoals(task.goals).map((goal) => goal.text),
+    xpReward: Number(task.xpReward) || 0,
+    goldReward: Number(task.goldReward) || 0,
+  };
+}
+
+function showBossChildrenChoice(type, id) {
+  const task = tasks.find((item) => item.id === id);
+  if (!task) return;
+  const children = tasks.filter((item) => item.parentId === id);
+  pendingBossChildrenAction = { type, id };
+  const verb = type === 'copy' ? '复制' : '保存为模板';
+  document.querySelector('#boss-children-choice-title').textContent = `${verb} Boss 任务`;
+  document.querySelector('#boss-children-choice-copy').textContent = children.length
+    ? `“${task.title}”下面有 ${children.length} 项子任务。要将这些子任务也${verb}吗？`
+    : `“${task.title}”目前没有子任务。你可以继续${verb} Boss 任务。`;
+  document.querySelector('#boss-children-choice-list').innerHTML = children.length
+    ? `<ul>${children.map((child) => `<li>${escapeHtml(child.title)}</li>`).join('')}</ul>`
+    : '';
+  document.querySelector('#boss-children-skip').hidden = children.length === 0;
+  document.querySelector('#boss-children-skip').textContent = '不保留子任务';
+  document.querySelector('#boss-children-keep').textContent = children.length ? '保留子任务并继续' : `继续${verb}`;
+  document.querySelector('#boss-children-choice').showModal();
+}
+
+function continueBossChildrenAction(includeChildren) {
+  const pending = pendingBossChildrenAction;
+  pendingBossChildrenAction = null;
+  document.querySelector('#boss-children-choice').close();
+  if (!pending) return;
+  if (pending.type === 'copy') copyTask(pending.id, includeChildren);
+  else if (pending.type === 'template') saveTaskAsTemplate(pending.id, includeChildren);
+  else copyTask(pending.id, false, includeChildren);
+}
+
+function showSubtaskCopyChoice(id) {
+  const task = tasks.find((item) => item.id === id);
+  const parent = task && tasks.find((item) => item.id === task.parentId);
+  if (!task || !parent) return;
+  pendingBossChildrenAction = { type: 'subtask-copy', id };
+  document.querySelector('#boss-children-choice-title').textContent = '复制子任务';
+  document.querySelector('#boss-children-choice-copy').textContent = `“${task.title}”属于 Boss“${parent.title}”。复制后要保留这个归属吗？`;
+  document.querySelector('#boss-children-choice-list').innerHTML = '';
+  document.querySelector('#boss-children-skip').hidden = false;
+  document.querySelector('#boss-children-skip').textContent = '复制为独立任务';
+  document.querySelector('#boss-children-keep').textContent = '保留原 Boss 所属';
+  document.querySelector('#boss-children-choice').showModal();
 }
 
 function openDailyCandidateTask(templateId) {
@@ -986,6 +1598,7 @@ function openDailyCandidateTask(templateId) {
   fields.namedItem('plannedDate').value = today;
   fields.namedItem('dailyRewardDate').value = today;
   fields.namedItem('dailyRewardTemplateId').value = preset.id;
+  fields.namedItem('tags').value = '日常, 每日';
   updateBranchField();
   updateRewardSuggestions();
   fields.namedItem('title').focus();
@@ -994,6 +1607,9 @@ function openDailyCandidateTask(templateId) {
 function openEditTask(id) {
   const task = tasks.find((item) => item.id === id);
   if (!task) return;
+  closeTaskGoalsWindow();
+  pendingTaskGoals = normaliseTaskGoals(task.goals);
+  configureTaskFormMode('task');
   const fields = taskForm.elements;
   fields.namedItem('id').value = task.id;
   fields.namedItem('dailyRewardDate').value = task.dailyRewardDate || '';
@@ -1014,6 +1630,7 @@ function openEditTask(id) {
   fields.namedItem('tags').value = (task.tags || []).join(', ');
   fields.namedItem('xpReward').value = task.xpReward ?? 0;
   fields.namedItem('goldReward').value = task.goldReward ?? 0;
+  renderTaskGoalEditor();
   suggestionTouched = { xp: true, gold: true };
   document.querySelector('#task-dialog-title').textContent = '编辑任务';
   document.querySelector('#task-form-error').hidden = true;
@@ -1031,16 +1648,16 @@ function openEditTask(id) {
 function updateParentTaskField(selectedParentId = '') {
   const select = taskForm.elements.namedItem('parentId');
   const currentId = taskForm.elements.namedItem('id').value;
-  const parents = tasks.filter((task) => task.isBoss && !task.parentId && task.id !== currentId);
+  const parents = tasks.filter((task) => task.isBoss && !task.parentId && task.id !== currentId && (task.status !== 'completed' || task.id === selectedParentId));
   select.innerHTML = `<option value="">独立任务</option>${parents.map((task) => `<option value="${escapeHtml(task.id)}">${escapeHtml(task.title)}</option>`).join('')}`;
   select.value = parents.some((task) => task.id === selectedParentId) ? selectedParentId : '';
   const isChild = Boolean(select.value);
   const bossCheck = taskForm.elements.namedItem('isBoss');
+  const recurrenceSelect = taskForm.elements.namedItem('recurrence');
   bossCheck.disabled = isChild;
+  recurrenceSelect.disabled = isChild;
+  if (isChild) recurrenceSelect.value = 'once';
   if (isChild) bossCheck.checked = false;
-  document.querySelector('#parent-task-hint').textContent = isChild
-    ? '子任务可独立更新状态与领取奖励；不会自动完成所属 Boss。'
-    : '关联顶层 Boss 可将此任务设为子任务；暂不支持子任务嵌套。';
   if (!suggestionTouched.xp || !suggestionTouched.gold) updateRewardSuggestions();
 }
 
@@ -1086,28 +1703,35 @@ function collectTask(formData) {
   const existing = tasks.find((task) => task.id === existingId);
   const status = formData.get('status');
   const isCompleted = status === 'completed';
+  const id = existingId || createUniqueId();
+  const recurrence = formData.get('recurrence') || 'once';
+  const plannedDate = formData.get('plannedDate') || '';
+  const createdAt = existing?.createdAt || new Date().toISOString();
   return {
     ...(existing || {}),
-    id: existingId || (globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`),
+    id,
     title: String(formData.get('title') || '').trim(),
     description: String(formData.get('description') || '').trim(),
     category: formData.get('category') || 'side',
     branch: formData.get('category') === 'main' ? formData.get('branch') : '',
     status,
-    recurrence: formData.get('recurrence') || 'once',
+    recurrence,
+    recurrenceSeriesId: recurrence !== 'once' ? (existing?.recurrenceSeriesId || (existing?.recurrence !== 'once' ? existing.id : id)) : (existing?.recurrenceSeriesId || ''),
+    occurrenceDate: existing?.occurrenceDate || (recurrence !== 'once' ? taskOccurrenceDate({ plannedDate, createdAt }) : ''),
     priority: formData.get('priority') || 'normal',
     rarity: formData.get('rarity') || 'common',
     isBoss: !formData.get('parentId') && taskForm.elements.namedItem('isBoss').checked,
     parentId: String(formData.get('parentId') || ''),
-    plannedDate: formData.get('plannedDate') || '',
+    plannedDate,
     dueAt: formData.get('dueAt') ? new Date(formData.get('dueAt')).toISOString() : '',
     tags: String(formData.get('tags') || '').split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
+    goals: normaliseTaskGoals(pendingTaskGoals),
     xpReward: Math.max(0, Math.floor(Number(formData.get('xpReward')) || 0)),
     goldReward: Math.max(0, Math.floor(Number(formData.get('goldReward')) || 0)),
     completionPercent: formData.get('completionPercent') === '' ? (existing?.completionPercent ?? null) : Number(formData.get('completionPercent')),
     dailyRewardDate: String(formData.get('dailyRewardDate') || existing?.dailyRewardDate || ''),
     dailyRewardTemplateId: String(formData.get('dailyRewardTemplateId') || existing?.dailyRewardTemplateId || ''),
-    createdAt: existing?.createdAt || new Date().toISOString(),
+    createdAt,
     updatedAt: new Date().toISOString(),
     completedAt: isCompleted ? (existing?.status === 'completed' ? existing.completedAt : new Date().toISOString()) : null,
     logs: existing?.logs || [],
@@ -1117,6 +1741,7 @@ function collectTask(formData) {
 function submitTask(event) {
   event.preventDefault();
   const formData = new FormData(taskForm);
+  pendingTaskGoals = collectTaskGoalEditor();
   const title = String(formData.get('title') || '').trim();
   const error = document.querySelector('#task-form-error');
   if (!title) {
@@ -1125,10 +1750,42 @@ function submitTask(event) {
     taskForm.elements.namedItem('title').focus();
     return;
   }
+  const emptyGoal = pendingTaskGoals.find((goal) => !goal.text.trim());
+  if (emptyGoal) {
+    error.textContent = '请填写目标内容，或移除尚未填写的目标。';
+    error.hidden = false;
+    document.querySelector(`#task-goal-list [data-goal-id="${CSS.escape(emptyGoal.id)}"] [data-task-goal-text]`)?.focus();
+    return;
+  }
   if (formData.get('category') === 'main' && !formData.get('branch')) {
     error.textContent = '主线任务需要选择科研、学业或找工分支。';
     error.hidden = false;
     taskForm.elements.namedItem('branch').focus();
+    return;
+  }
+  if (taskFormMode === 'template') {
+    const oldTemplate = taskTemplates.find((item) => item.id === editingTemplateId);
+    const childTemplates = taskForm.elements.namedItem('isBoss').checked ? collectTemplateChildrenFromEditor() : [];
+    const invalidChild = childTemplates.find((child) => !child.title || (child.category === 'main' && !child.branch));
+    if (invalidChild) {
+      error.textContent = '请填写每项子任务的名称；主线子任务还需要选择分支。';
+      error.hidden = false;
+      const row = [...document.querySelectorAll('#template-child-list [data-template-child-id]')].find((item) => item.dataset.templateChildId === invalidChild.id);
+      row?.querySelector('[data-template-child-field="title"]')?.focus();
+      return;
+    }
+    const template = templateFromFields(formData, editingTemplateId, oldTemplate?.createdAt || '', null, childTemplates);
+    const nextTemplates = normaliseTaskTemplates(editingTemplateId
+      ? taskTemplates.map((item) => item.id === editingTemplateId ? template : item)
+      : [...taskTemplates, template]);
+    if (!persistTasks(tasks, economy, calendarMoods, rewards, dailyRewardClaims, achievementUnlocks, customAchievements, soundEnabled, nextTemplates)) return;
+    taskDialog.close();
+    taskFormMode = 'task';
+    editingTemplateId = '';
+    if (document.querySelector('#task-template-dialog').open) renderTaskTemplates();
+    if (location.hash === '#tasks') renderTaskPage();
+    playUiSound('save');
+    showToast(oldTemplate ? `模板“${template.title}”已更新。` : `模板“${template.title}”已创建。`);
     return;
   }
   const id = formData.get('id');
@@ -1147,6 +1804,14 @@ function submitTask(event) {
     taskForm.elements.namedItem('isBoss').focus();
     return;
   }
+  const isCompletingBoss = formData.get('status') === 'completed' && previous?.status !== 'completed' && taskForm.elements.namedItem('isBoss').checked && !parentId;
+  const incompleteChildren = isCompletingBoss ? tasks.filter((task) => task.parentId === id && task.status !== 'completed') : [];
+  if (incompleteChildren.length) {
+    error.textContent = `请先完成 Boss 下面的全部子任务，还有 ${incompleteChildren.length} 项未完成。`;
+    error.hidden = false;
+    taskForm.elements.namedItem('status').focus();
+    return;
+  }
   const completionValue = Number(formData.get('completionPercent'));
   if (formData.get('status') === 'completed' && previous?.status !== 'completed' && !previous?.rewardGrantedAt && !previous?.rewardSkippedLegacy && (formData.get('completionPercent') === '' || !Number.isSafeInteger(completionValue) || completionValue < 0)) {
     error.textContent = '首次完成任务时，请输入 0% 以上的整数完成度。';
@@ -1155,6 +1820,8 @@ function submitTask(event) {
     return;
   }
   let next = collectTask(formData);
+  const childrenFromTemplate = !id && next.isBoss ? pendingTemplateChildren : [];
+  const newChildTasks = childrenFromTemplate.map((child) => taskFromTemplate(child, next));
   let nextEconomy = economy;
   let awardedNow = false;
   if (next.status === 'completed') {
@@ -1166,8 +1833,9 @@ function submitTask(event) {
   const levelBefore = RewardRules.levelInfo(economyTotals(economy).xp).level;
   const levelAfter = RewardRules.levelInfo(economyTotals(nextEconomy).xp).level;
   const levelNotice = awardedNow ? levelUpNotice(levelBefore, levelAfter) : '';
-  const nextTasks = id ? tasks.map((task) => task.id === id ? next : task) : [...tasks, next];
+  const nextTasks = id ? tasks.map((task) => task.id === id ? next : task) : [...tasks, next, ...newChildTasks];
   if (!persistTasks(nextTasks, nextEconomy)) return;
+  pendingTemplateChildren = [];
   taskDialog.close();
   refreshTaskView();
   const award = nextEconomy.ledger.find((entry) => entry.taskId === next.id);
@@ -1176,6 +1844,100 @@ function submitTask(event) {
   else playUiSound(id ? 'save' : 'create');
   const taskNotice = awardedNow ? `任务已完成（${next.completionPercent}%），获得 ${award.xpDelta} XP 和 ${award.goldDelta} 金币。` : id ? '任务已保存，进展记录已保留。' : '任务已创建。';
   showCompletionFeedback(taskNotice, levelNotice);
+}
+
+function beginCopyTask(id) {
+  const task = tasks.find((item) => item.id === id);
+  if (task?.parentId) {
+    showSubtaskCopyChoice(id);
+    return;
+  }
+  if (task?.isBoss) {
+    showBossChildrenChoice('copy', id);
+    return;
+  }
+  copyTask(id, false);
+}
+
+function duplicateTaskRecord(task, overrides = {}) {
+  const now = new Date().toISOString();
+  const today = localDateKey(new Date());
+  const id = createUniqueId();
+  const recurrence = overrides.parentId ? 'once' : task.recurrence;
+  return {
+    ...task,
+    id,
+    recurrence,
+    recurrenceSeriesId: recurrence !== 'once' ? id : '',
+    occurrenceDate: recurrence !== 'once' ? today : '',
+    status: 'todo',
+    plannedDate: task.plannedDate === today ? task.plannedDate : today,
+    dueAt: new Date(defaultEndOfDayDateTime()).toISOString(),
+    completionPercent: null,
+    completedAt: null,
+    rewardGrantedAt: null,
+    rewardSkippedLegacy: false,
+    logs: [],
+    goals: normaliseTaskGoals(task.goals).map((goal) => ({ ...goal, id: createUniqueId(), isComplete: false, lastCompletedAt: null })),
+    dailyRewardDate: '',
+    dailyRewardTemplateId: '',
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+function copyTask(id, includeChildren = false, keepParent = false) {
+  const original = tasks.find((item) => item.id === id);
+  if (!original) return;
+  const suffixMatch = original.title.match(/\s\((\d+)\)$/);
+  const baseTitle = suffixMatch ? original.title.slice(0, suffixMatch.index) : original.title;
+  const usedNumbers = tasks.flatMap((item) => {
+    const match = item.title.match(/^(.*) \((\d+)\)$/);
+    return match && match[1] === baseTitle ? [Number(match[2])] : [];
+  });
+  const nextNumber = usedNumbers.length ? Math.max(...usedNumbers) + 1 : 1;
+  const duplicate = duplicateTaskRecord(original, { title: `${baseTitle} (${nextNumber})`, parentId: keepParent ? original.parentId : '' });
+  const children = includeChildren ? tasks.filter((item) => item.parentId === id) : [];
+  const duplicateChildren = children.map((child) => duplicateTaskRecord(child, { parentId: duplicate.id }));
+  if (!persistTasks([...tasks, duplicate, ...duplicateChildren])) return;
+  detailDialog.close();
+  refreshTaskView();
+  playUiSound('create');
+  showToast(`已复制任务“${duplicate.title}”${duplicateChildren.length ? `及 ${duplicateChildren.length} 项子任务` : ''}。`);
+  renderDetail(duplicate.id);
+}
+
+function taskFromTemplate(template, parentTask) {
+  const now = new Date().toISOString();
+  return {
+    id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    title: template.title,
+    description: template.description || '',
+    category: template.category || 'side',
+    branch: template.category === 'main' ? template.branch || '' : '',
+    status: 'todo',
+    recurrence: 'once',
+    priority: template.priority || 'normal',
+    rarity: template.rarity || 'common',
+    isBoss: false,
+    parentId: parentTask.id,
+    plannedDate: parentTask.plannedDate || '',
+    dueAt: new Date(todayDateTimeLocal(template.dueTime || '23:59')).toISOString(),
+    tags: Array.isArray(template.tags) ? [...template.tags] : [],
+    goals: normaliseTemplateGoals(template.goals).map((text) => ({ id: createUniqueId(), text, isComplete: false, lastCompletedAt: null })),
+    xpReward: Number(template.xpReward) || 0,
+    goldReward: Number(template.goldReward) || 0,
+    completionPercent: null,
+    dailyRewardDate: '',
+    dailyRewardTemplateId: '',
+    createdAt: now,
+    updatedAt: now,
+    completedAt: null,
+    rewardGrantedAt: null,
+    rewardSkippedLegacy: false,
+    logs: [],
+  };
 }
 
 function detailRows(task) {
@@ -1211,11 +1973,11 @@ function renderTaskRelations(task) {
     const children = tasks.filter((item) => item.parentId === task.id);
     const completed = children.filter((item) => item.status === 'completed').length;
     const progress = children.length ? Math.round(completed / children.length * 100) : 0;
-    return `<section class="task-relations" aria-labelledby="child-tasks-heading"><div class="section-heading"><div><p class="eyebrow">挑战拆解</p><h3 id="child-tasks-heading">子任务进度 ${completed}/${children.length}</h3></div><button class="pixel-button button-muted" type="button" data-action="new-child-task" data-id="${escapeHtml(task.id)}">＋ 添加子任务</button></div>${children.length ? `<div class="boss-progress-track" role="progressbar" aria-label="子任务完成进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"><span style="width:${progress}%"></span></div><div class="child-task-list">${children.map((child) => `<button class="child-task-row" type="button" data-action="open-detail" data-id="${escapeHtml(child.id)}"><span>${escapeHtml(child.title)}</span><span class="status-pill status-${escapeHtml(child.status)}">${escapeHtml(statusLabels[child.status] || '待办')}</span></button>`).join('')}</div>` : '<p class="log-empty">还没有子任务。拆分后可分别跟踪进展；父任务与子任务状态独立。</p>'}<p class="field-hint">状态与奖励分别记录；完成 Boss 不会自动完成子任务，完成子任务也不会自动完成 Boss。</p></section>`;
+    return `<section class="task-relations" aria-labelledby="child-tasks-heading"><div class="section-heading"><div><p class="eyebrow">挑战拆解</p><h3 id="child-tasks-heading">子任务进度 ${completed}/${children.length}</h3></div><button class="pixel-button button-muted" type="button" data-action="new-child-task" data-id="${escapeHtml(task.id)}" ${task.status === 'completed' ? 'disabled' : ''}>${task.status === 'completed' ? 'Boss 已完成' : '＋ 添加子任务'}</button></div>${children.length ? `<div class="boss-progress-track" role="progressbar" aria-label="子任务完成进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"><span style="width:${progress}%"></span></div><div class="child-task-list">${children.map((child) => `<button class="child-task-row" type="button" data-action="open-detail" data-id="${escapeHtml(child.id)}"><span>${escapeHtml(child.title)}</span><span class="status-pill status-${escapeHtml(child.status)}">${escapeHtml(statusLabels[child.status] || '待办')}</span></button>`).join('')}</div>` : '<p class="log-empty">还没有子任务。拆分后可分别跟踪进展；父任务与子任务状态独立。</p>'}<p class="field-hint">完成 Boss 前需完成全部子任务；完成状态不会自动联动。</p></section>`;
   }
   if (task.parentId) {
     const parent = tasks.find((item) => item.id === task.parentId);
-    if (parent) return `<section class="task-relations"><p class="eyebrow">所属 Boss</p><button class="child-task-row" type="button" data-action="open-detail" data-id="${escapeHtml(parent.id)}"><span>${escapeHtml(parent.title)}</span><span class="status-pill status-${escapeHtml(parent.status)}">${escapeHtml(statusLabels[parent.status] || '待办')}</span></button><p class="field-hint">子任务状态与奖励独立记录，不会自动改变所属 Boss。</p></section>`;
+    if (parent) return `<section class="task-relations"><p class="eyebrow">所属 Boss</p><button class="child-task-row" type="button" data-action="open-detail" data-id="${escapeHtml(parent.id)}"><span>${escapeHtml(parent.title)}</span><span class="status-pill status-${escapeHtml(parent.status)}">${escapeHtml(statusLabels[parent.status] || '待办')}</span></button></section>`;
   }
   return '';
 }
@@ -1224,17 +1986,161 @@ function renderDetail(id) {
   const task = tasks.find((item) => item.id === id);
   if (!task) return;
   activeDetailId = id;
+  const goals = normaliseTaskGoals(task.goals);
+  const completedGoals = goals.filter((goal) => goal.isComplete).length;
   document.querySelector('#detail-content').innerHTML = `
     <div class="dialog-heading"><div><p class="eyebrow">${escapeHtml(categoryLabels[task.category] || '支线')}${task.isBoss ? ' · BOSS 挑战' : ''}</p><h2 id="detail-title">${escapeHtml(task.title)}</h2></div><button class="icon-button" type="button" data-close-dialog="detail-dialog" aria-label="关闭">×</button></div>
     ${task.description ? `<p class="detail-description">${escapeHtml(task.description).replace(/\n/g, '<br>')}</p>` : '<p class="detail-description detail-empty-description">还没有填写描述。</p>'}
     <dl class="detail-list">${detailRows(task)}</dl>
     ${renderTaskRelations(task)}
+    <section class="task-goal-summary"><div><strong>任务目标</strong><span>${goals.length ? `${completedGoals} / ${goals.length} 项完成` : '尚未添加目标'}</span></div><button class="pixel-button button-muted" type="button" data-action="open-task-goals" data-id="${escapeHtml(task.id)}">${goals.length ? '打开目标悬浮窗' : '查看目标'}</button></section>
     <section class="log-section" aria-labelledby="log-heading"><div class="log-heading"><h3 id="log-heading">进展记录</h3><span>${task.logs.length} 条</span></div>
       ${task.logs.length ? `<ol class="log-list">${[...task.logs].reverse().map((log) => `<li><time datetime="${escapeHtml(log.createdAt)}">${escapeHtml(formatDate(log.createdAt, { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }))}</time><p>${escapeHtml(log.content).replace(/\n/g, '<br>')}</p></li>`).join('')}</ol>` : '<p class="log-empty">记录任务过程中的小进展，方便之后回顾。</p>'}
       <form class="log-form" data-log-form><label for="log-content">添加一条进展</label><textarea id="log-content" name="content" rows="2" required maxlength="1000" placeholder="今天推进了什么？"></textarea><button class="pixel-button" type="submit">保存记录</button></form>
     </section>
-    <div class="dialog-actions detail-actions"><button class="pixel-button button-danger" type="button" data-action="delete-task" data-id="${escapeHtml(task.id)}">删除任务</button><span></span><button class="pixel-button button-muted" type="button" data-action="edit-task" data-id="${escapeHtml(task.id)}">编辑</button><button class="pixel-button" type="button" data-action="toggle-task" data-id="${escapeHtml(task.id)}">${task.status === 'completed' ? '重新打开' : '标记完成'}</button></div>`;
+    <div class="dialog-actions detail-actions"><button class="pixel-button button-danger" type="button" data-action="delete-task" data-id="${escapeHtml(task.id)}">删除任务</button><button class="pixel-button button-muted" type="button" data-action="save-task-as-template" data-id="${escapeHtml(task.id)}">保存为模板</button><span></span><button class="pixel-button button-muted" type="button" data-action="copy-task" data-id="${escapeHtml(task.id)}">复制任务</button><button class="pixel-button button-muted" type="button" data-action="edit-task" data-id="${escapeHtml(task.id)}">编辑</button><button class="pixel-button" type="button" data-action="toggle-task" data-id="${escapeHtml(task.id)}">${task.status === 'completed' ? '重新打开' : '标记完成'}</button></div>`;
   if (!detailDialog.open) detailDialog.showModal();
+  if (activeGoalsTaskId === id && taskGoalsWindow.open) renderTaskGoalsWindow();
+}
+
+function openTaskGoalsWindow(id) {
+  if (!tasks.some((task) => task.id === id)) return;
+  if (detailDialog.open) detailDialog.close();
+  activeGoalsTaskId = id;
+  renderTaskGoalsWindow();
+  if (goalsPipWindow) { renderTaskGoalsWindow(); return; }
+  if (!taskGoalsWindow.open) taskGoalsWindow.show();
+  (taskGoalsWindow.querySelector('[data-goal-check]') || taskGoalsWindow.querySelector('[data-action="create-goal-draft"]'))?.focus();
+}
+
+function renderTaskGoalsWindow() {
+  const task = tasks.find((item) => item.id === activeGoalsTaskId);
+  if (!task) {
+    closeTaskGoalsWindow();
+    return;
+  }
+  const goals = normaliseTaskGoals(task.goals);
+  const draft = goalDraft?.taskId === task.id ? `<div class="task-goal-draft-row"><span class="task-goal-draft-marker" aria-hidden="true">›</span><input class="task-goal-draft-input" data-goal-draft-input data-draft-id="${escapeHtml(goalDraft.id)}" aria-label="编辑新目标" placeholder="输入待办事项" value="${escapeHtml(goalDraft.text)}" /></div>` : '';
+  const html = `<header class="task-goals-window-header"><h2 id="task-goals-window-title">${escapeHtml(task.title)}</h2><div class="task-goals-window-controls"><button class="icon-button goal-add-button" type="button" data-action="create-goal-draft" aria-label="添加待办" title="添加待办">＋</button><button class="icon-button" type="button" data-action="toggle-goals-pin" aria-label="跨应用置顶" title="跨应用置顶">↗</button><button class="icon-button" type="button" data-close-dialog="task-goals-window" aria-label="关闭目标悬浮窗" title="关闭">×</button></div></header><div class="task-goals-checklist">${goals.map((goal) => `<label class="task-goal-check-row"><input type="checkbox" data-goal-check data-task-id="${escapeHtml(task.id)}" data-goal-id="${escapeHtml(goal.id)}" aria-label="完成目标：${escapeHtml(goal.text)}" ${goal.isComplete ? 'checked' : ''} /><span class="task-goal-check-copy"><strong>${escapeHtml(goal.text)}</strong></span></label>`).join('')}${draft}</div>`;
+  if (goalsPipWindow && !goalsPipWindow.closed) {
+    goalsPipWindow.document.querySelector('#goals-pip-content').innerHTML = html.replace('data-action="toggle-goals-pin"', 'data-action="return-goals-inline"').replace('跨应用置顶', '返回应用内窗口').replace('title="跨应用置顶"', 'title="返回"').replace('data-close-dialog="task-goals-window"', 'data-action="close-goals-pip"');
+  } else {
+    taskGoalsWindow.classList.toggle('is-pinned', goalsWindowPinned);
+    document.querySelector('#task-goals-window-content').innerHTML = html;
+  }
+}
+
+function startGoalDraft() {
+  if (!activeGoalsTaskId) return;
+  if (goalDraft?.text.trim()) saveGoalDraft();
+  goalDraft = { taskId: activeGoalsTaskId, id: createUniqueId(), text: '' };
+  renderTaskGoalsWindow();
+  (goalsPipWindow?.document.querySelector('[data-goal-draft-input]') || taskGoalsWindow.querySelector('[data-goal-draft-input]'))?.focus();
+}
+
+function saveGoalDraft() {
+  if (!goalDraft) return;
+  const draft = goalDraft;
+  const text = draft.text.trim();
+  goalDraft = null;
+  const task = tasks.find((item) => item.id === draft.taskId);
+  if (!text || !task) { renderTaskGoalsWindow(); return; }
+  const timestamp = new Date().toISOString();
+  const nextGoal = { id: draft.id, text, isComplete: false, lastCompletedAt: null };
+  const nextTasks = tasks.map((item) => item.id === task.id ? { ...item, goals: [...normaliseTaskGoals(item.goals), nextGoal], updatedAt: timestamp } : item);
+  if (!persistTasks(nextTasks)) { goalDraft = draft; renderTaskGoalsWindow(); return; }
+  renderTaskGoalsWindow();
+  (goalsPipWindow?.document.querySelector(`[data-goal-id="${CSS.escape(draft.id)}"]`) || taskGoalsWindow.querySelector(`[data-goal-id="${CSS.escape(draft.id)}"]`))?.focus();
+  if (detailDialog.open && activeDetailId === task.id) renderDetail(task.id);
+}
+
+function handleGoalDraftInput(event) {
+  if (event.target.matches('[data-goal-draft-input]') && goalDraft?.id === event.target.dataset.draftId) goalDraft.text = event.target.value;
+}
+
+function handleGoalDraftKeydown(event) {
+  if (!event.target.matches('[data-goal-draft-input]')) return;
+  if (event.key === 'Enter') { event.preventDefault(); saveGoalDraft(); }
+  if (event.key === 'Escape') { event.preventDefault(); goalDraft = null; renderTaskGoalsWindow(); }
+}
+
+async function toggleGoalsWindowPin() {
+  if (goalsPipWindow && !goalsPipWindow.closed) { returnGoalsWindowInline(); return; }
+  const pipApi = window.documentPictureInPicture;
+  if (!pipApi?.requestWindow) {
+    showToast('当前浏览器不支持跨应用置顶；窗口仍可在应用内拖动和缩放。');
+    return;
+  }
+  try {
+    const pip = await pipApi.requestWindow({ width: 380, height: 480 });
+    goalsPipWindow = pip;
+    goalsWindowPinned = true;
+    pip.document.title = tasks.find((item) => item.id === activeGoalsTaskId)?.title || '任务目标';
+    document.querySelectorAll('link[rel="stylesheet"]').forEach((source) => {
+      const link = pip.document.createElement('link'); link.rel = 'stylesheet'; link.href = source.href; pip.document.head.append(link);
+    });
+    pip.document.body.className = 'goals-picture-in-picture';
+    pip.document.body.innerHTML = '<main id="goals-pip-content" class="task-goals-window-content"></main>';
+    pip.document.addEventListener('change', (event) => {
+      if (event.target.matches('[data-goal-check]')) toggleTaskGoal(event.target.dataset.taskId, event.target.dataset.goalId, event.target.checked);
+    });
+    pip.document.addEventListener('input', handleGoalDraftInput);
+    pip.document.addEventListener('keydown', handleGoalDraftKeydown);
+    pip.document.addEventListener('focusout', (event) => { if (event.target.matches('[data-goal-draft-input]')) saveGoalDraft(); });
+    pip.document.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-action]');
+      if (button?.dataset.action === 'return-goals-inline') returnGoalsWindowInline();
+      if (button?.dataset.action === 'close-goals-pip') pip.close();
+      if (button?.dataset.action === 'create-goal-draft') startGoalDraft();
+    });
+    pip.addEventListener('pagehide', () => {
+      goalsPipWindow = null;
+      goalsWindowPinned = false;
+      if (goalsPipReturnToInline) {
+        goalsPipReturnToInline = false;
+        taskGoalsWindow.show();
+        renderTaskGoalsWindow();
+      } else activeGoalsTaskId = null;
+    }, { once: true });
+    taskGoalsWindow.close();
+    renderTaskGoalsWindow();
+  } catch {
+    goalsWindowPinned = false;
+    showToast('无法打开跨应用置顶窗口；请确认浏览器允许画中画窗口。');
+  }
+}
+
+function returnGoalsWindowInline() {
+  if (!goalsPipWindow) return;
+  goalsPipReturnToInline = true;
+  goalsPipWindow.close();
+}
+
+function closeTaskGoalsWindow() {
+  if (taskGoalsWindow?.open) taskGoalsWindow.close();
+  if (goalsPipWindow && !goalsPipWindow.closed) goalsPipWindow.close();
+  goalsPipWindow = null;
+  activeGoalsTaskId = null;
+  goalsWindowPinned = false;
+}
+
+function toggleTaskGoal(taskId, goalId, isComplete) {
+  const task = tasks.find((item) => item.id === taskId);
+  const goal = task && normaliseTaskGoals(task.goals).find((item) => item.id === goalId);
+  if (!task || !goal || goal.isComplete === isComplete) return;
+  const timestamp = new Date().toISOString();
+  const nextGoal = { ...goal, isComplete, lastCompletedAt: isComplete ? timestamp : goal.lastCompletedAt };
+  const nextGoals = normaliseTaskGoals(task.goals).map((item) => item.id === goalId ? nextGoal : item);
+  const goalHistory = reconcileTaskGoalRecords(nextGoals, task.logs);
+  const nextTasks = tasks.map((item) => item.id === taskId ? { ...item, goals: goalHistory.goals, logs: goalHistory.logs, updatedAt: timestamp } : item);
+  if (!persistTasks(nextTasks)) {
+    renderTaskGoalsWindow();
+    return;
+  }
+  if (detailDialog.open && activeDetailId === taskId) renderDetail(taskId);
+  renderTaskGoalsWindow();
+  taskGoalsWindow.querySelector(`[data-goal-id="${CSS.escape(goalId)}"]`)?.focus();
+  if (isComplete) showToast(`目标已完成：${goal.text}`);
 }
 
 function toggleTask(id) {
@@ -1253,6 +2159,18 @@ function toggleTask(id) {
   refreshTaskView();
   if (detailDialog.open && activeDetailId === id) renderDetail(id);
   showToast('任务已重新打开；已发放奖励不会撤回。');
+}
+
+function incompleteBossChildren(task) {
+  if (!task?.isBoss) return [];
+  return tasks.filter((item) => item.parentId === task.id && item.status !== 'completed');
+}
+
+function blockBossCompletion(task) {
+  const incomplete = incompleteBossChildren(task);
+  if (!incomplete.length) return false;
+  showToast(`还不能完成 Boss“${task.title}”：请先完成全部子任务（剩余 ${incomplete.length} 项）。`);
+  return true;
 }
 
 function setTaskStatus(id, status) {
@@ -1277,6 +2195,7 @@ function setTaskStatus(id, status) {
 function openCompletionDialog(id) {
   const task = tasks.find((item) => item.id === id);
   if (!task) return;
+  if (blockBossCompletion(task)) return;
   completionForm.reset();
   completionForm.elements.namedItem('taskId').value = id;
   completionForm.elements.namedItem('completionPercent').value = '';
@@ -1288,6 +2207,7 @@ function openCompletionDialog(id) {
 function completeTask(id, completionPercent) {
   const previous = tasks.find((task) => task.id === id);
   if (!previous || previous.status === 'completed') return;
+  if (blockBossCompletion(previous)) return;
   const now = new Date().toISOString();
   const updated = { ...previous, status: 'completed', completionPercent, completedAt: now, updatedAt: now };
   const outcome = registerFirstCompletion(updated, previous, economy);
@@ -1355,6 +2275,7 @@ function deleteTask(id) {
   const now = new Date().toISOString();
   const nextTasks = tasks.filter((item) => item.id !== id).map((item) => item.parentId === id ? { ...item, parentId: '', updatedAt: now } : item);
   if (!persistTasks(nextTasks)) return;
+  if (activeGoalsTaskId === id) closeTaskGoalsWindow();
   playUiSound('delete');
   detailDialog.close();
   activeDetailId = null;
@@ -1384,6 +2305,7 @@ window.addEventListener('storage', (event) => {
   if (event.key === STORAGE_KEY) {
     state = loadState();
     tasks = state.tasks;
+    taskTemplates = state.taskTemplates;
     economy = state.economy;
     calendarMoods = state.calendarMoods;
     rewards = state.rewards;
@@ -1391,6 +2313,8 @@ window.addEventListener('storage', (event) => {
     customAchievements = state.customAchievements;
     achievementUnlocks = state.achievementUnlocks;
     soundEnabled = state.soundEnabled;
+    if (activeGoalsTaskId && tasks.some((task) => task.id === activeGoalsTaskId) && (taskGoalsWindow.open || goalsPipWindow)) renderTaskGoalsWindow();
+    else if (activeGoalsTaskId && !tasks.some((task) => task.id === activeGoalsTaskId)) closeTaskGoalsWindow();
     updateSoundToggle();
     if (location.hash === '#tasks') renderTaskPage();
     if (location.hash === '#board') renderBoardPage();
@@ -1413,6 +2337,23 @@ document.addEventListener('click', (event) => {
   if (!actionButton) return;
   const { action, id } = actionButton.dataset;
   if (action === 'new-task') openNewTask();
+  if (action === 'add-task-goal') addTaskGoal();
+  if (action === 'remove-task-goal') removeTaskGoal(id);
+  if (action === 'open-task-goals') openTaskGoalsWindow(id);
+  if (action === 'toggle-goals-pin') toggleGoalsWindowPin();
+  if (action === 'create-goal-draft') startGoalDraft();
+  if (action === 'open-task-templates') renderTaskTemplates();
+  if (action === 'new-task-template') { document.querySelector('#task-template-dialog').close(); openNewTemplate(); }
+  if (action === 'use-task-template') useTaskTemplate(id);
+  if (action === 'edit-task-template') openEditTemplate(id);
+  if (action === 'delete-task-template') deleteTaskTemplate(id);
+  if (action === 'template-child-add') addTemplateChild();
+  if (action === 'template-child-delete') removeTemplateChild(id);
+  if (action === 'copy-task') beginCopyTask(id);
+  if (action === 'save-task-as-template') beginSaveTaskAsTemplate(id);
+  if (action === 'boss-children-keep') continueBossChildrenAction(true);
+  if (action === 'boss-children-skip') continueBossChildrenAction(false);
+  if (action === 'boss-children-cancel') { pendingBossChildrenAction = null; document.querySelector('#boss-children-choice').close(); }
   if (action === 'new-reward') openNewReward();
   if (action === 'edit-reward') openEditReward(id);
   if (action === 'toggle-reward') toggleReward(id);
@@ -1423,7 +2364,7 @@ document.addEventListener('click', (event) => {
   if (action === 'toggle-audio') toggleSound();
   if (action === 'new-child-task') {
     const parent = tasks.find((task) => task.id === id);
-    if (parent?.isBoss && !parent.parentId) {
+    if (parent?.isBoss && !parent.parentId && parent.status !== 'completed') {
       detailDialog.close();
       openNewTask(parent.id, parent.id);
     }
@@ -1443,10 +2384,27 @@ document.addEventListener('submit', (event) => {
   if (event.target === completionForm) submitCompletion(event);
   if (event.target === rewardForm) submitReward(event);
   if (event.target === achievementForm) submitAchievement(event);
+  if (event.target.id === 'board-filters' || event.target.id === 'ledger-filters') event.preventDefault();
   if (event.target.id === 'task-filters') event.preventDefault();
   if (event.target.matches('[data-log-form]')) { event.preventDefault(); addLog(event.target); }
 });
 document.addEventListener('change', (event) => {
+  if (event.target.matches('[data-goal-check]')) {
+    toggleTaskGoal(event.target.dataset.taskId, event.target.dataset.goalId, event.target.checked);
+    return;
+  }
+  if (event.target.closest('#board-filters')) {
+    updateBoardFilters(event);
+    return;
+  }
+  if (event.target.closest('#ledger-filters')) {
+    updateLedgerFilters(event);
+    return;
+  }
+  if (event.target === achievementForm.elements.namedItem('icon')) {
+    updateAchievementIconPreview();
+    return;
+  }
   if (event.target === achievementForm.elements.namedItem('kind')) {
     updateAchievementTagField();
     return;
@@ -1465,6 +2423,30 @@ document.addEventListener('change', (event) => {
   }
   if (event.target.closest('#task-filters')) updateTaskFilters(event);
 });
+document.addEventListener('input', handleGoalDraftInput);
+document.addEventListener('keydown', handleGoalDraftKeydown);
+document.addEventListener('focusout', (event) => { if (event.target.matches('[data-goal-draft-input]')) saveGoalDraft(); });
+document.addEventListener('pointerdown', (event) => {
+  if (taskGoalsWindow.open && !goalsWindowPinned && !taskGoalsWindow.contains(event.target) && !event.target.closest('[data-action="open-task-goals"]')) closeTaskGoalsWindow();
+});
+taskGoalsWindow.addEventListener('pointerdown', (event) => {
+  const header = event.target.closest('.task-goals-window-header');
+  if (!header || event.target.closest('button') || event.button !== 0) return;
+  const rect = taskGoalsWindow.getBoundingClientRect();
+  const offsetX = event.clientX - rect.left;
+  const offsetY = event.clientY - rect.top;
+  taskGoalsWindow.style.inset = 'auto';
+  taskGoalsWindow.style.left = `${rect.left}px`;
+  taskGoalsWindow.style.top = `${rect.top}px`;
+  const move = (moveEvent) => {
+    taskGoalsWindow.style.left = `${Math.max(0, Math.min(window.innerWidth - taskGoalsWindow.offsetWidth, moveEvent.clientX - offsetX))}px`;
+    taskGoalsWindow.style.top = `${Math.max(0, Math.min(window.innerHeight - 48, moveEvent.clientY - offsetY))}px`;
+  };
+  const stop = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', stop); };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', stop, { once: true });
+});
+taskGoalsWindow.addEventListener('close', () => { if (!goalsPipWindow) { activeGoalsTaskId = null; goalsWindowPinned = false; } });
 taskDialog.addEventListener('close', () => {
   const parentId = returnToDetailAfterTaskDialog;
   returnToDetailAfterTaskDialog = null;
@@ -1472,15 +2454,21 @@ taskDialog.addEventListener('close', () => {
 });
 document.addEventListener('reset', (event) => {
   if (event.target.id === 'task-filters') updateTaskFilters(event);
+  if (event.target.id === 'board-filters') updateBoardFilters(event);
+  if (event.target.id === 'ledger-filters') updateLedgerFilters(event);
 });
 rewardForm.elements.namedItem('template').addEventListener('change', applyRewardTemplate);
 taskForm.elements.namedItem('category').addEventListener('change', () => { updateBranchField(); updateRewardSuggestions(); });
-taskForm.elements.namedItem('isBoss').addEventListener('change', () => { updateRewardSuggestions(); });
+taskForm.elements.namedItem('isBoss').addEventListener('change', () => { updateRewardSuggestions(); updateTemplateChildrenField(); });
 ['recurrence', 'rarity'].forEach((name) => taskForm.elements.namedItem(name).addEventListener('change', updateRewardSuggestions));
 taskForm.elements.namedItem('status').addEventListener('change', updateCompletionField);
 taskForm.elements.namedItem('xpReward').addEventListener('input', () => { suggestionTouched.xp = true; });
 taskForm.elements.namedItem('goldReward').addEventListener('input', () => { suggestionTouched.gold = true; });
-if (LocalDataStore.active || reconcileAchievementUnlocks(achievementUnlocks, tasks, economy).newlyUnlocked.length) {
-  persistTasks(tasks, economy, calendarMoods, rewards, dailyRewardClaims);
+const refreshedRecurringTasks = storageLoadFailed ? tasks : generateDueRecurringTasks(tasks);
+const recurringTasksAdded = refreshedRecurringTasks.length > tasks.length;
+const newAchievements = reconcileAchievementUnlocks(achievementUnlocks, refreshedRecurringTasks, economy).newlyUnlocked.length;
+if (LocalDataStore.active || recurringTasksAdded || newAchievements) {
+  persistTasks(refreshedRecurringTasks, economy, calendarMoods, rewards, dailyRewardClaims);
 }
+scheduleRecurringTaskRefresh();
 renderRoute();

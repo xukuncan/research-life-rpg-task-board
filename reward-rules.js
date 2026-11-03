@@ -5,13 +5,13 @@
 window.RewardRules = Object.freeze({
   version: 1,
   baseRewards: Object.freeze({
-    side: Object.freeze({ xp: 16, gold: 6 }),
-    main: Object.freeze({ xp: 36, gold: 14 }),
+    side: Object.freeze({ xp: 16, gold: 8 }),
+    main: Object.freeze({ xp: 36, gold: 18 }),
   }),
   rarityMultipliers: Object.freeze({ common: 1, rare: 1.1, epic: 1.25, legendary: 1.5 }),
   bossMultiplier: 2,
   completionRewardCap: 200,
-  recurrenceMultipliers: Object.freeze({ once: 1, daily: 0.55, weekly: 0.75 }),
+  recurrenceMultipliers: Object.freeze({ once: 1, daily: 1, weekly: 1.5 }),
   levelThresholds: Object.freeze([0, 100, 250, 450, 700, 1000, 1350, 1750, 2200, 2700]),
 
   suggestTaskRewards(task) {
